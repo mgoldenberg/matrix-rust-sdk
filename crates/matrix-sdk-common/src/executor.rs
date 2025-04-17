@@ -47,13 +47,13 @@ where
         let _ = future.await;
     });
 
-    JoinHandle { remote_handle, abort_handle }
+    JoinHandle { remote_handle: Some(remote_handle), abort_handle }
 }
 
 #[cfg(target_arch = "wasm32")]
 #[derive(Debug)]
 pub struct JoinHandle<T> {
-    remote_handle: RemoteHandle<T>,
+    remote_handle: Option<RemoteHandle<T>>,
     abort_handle: AbortHandle,
 }
 
@@ -61,6 +61,20 @@ pub struct JoinHandle<T> {
 impl<T> JoinHandle<T> {
     pub fn abort(&self) {
         self.abort_handle.abort();
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.abort_handle.is_aborted()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl<T> Drop for JoinHandle<T> {
+    fn drop(&mut self) {
+        // don't abort the spawned future
+        if let Some(h) = self.remote_handle.take() {
+            h.forget();
+        }
     }
 }
 
@@ -72,8 +86,10 @@ impl<T: 'static> Future for JoinHandle<T> {
         if self.abort_handle.is_aborted() {
             // The future has been aborted. It is not possible to poll it again.
             Poll::Ready(Err(JoinError))
+        } else if let Some(handle) = self.remote_handle.as_mut() {
+            Pin::new(handle).poll(cx).map(Ok)
         } else {
-            Pin::new(&mut self.remote_handle).poll(cx).map(Ok)
+            Poll::Ready(Err(JoinError))
         }
     }
 }

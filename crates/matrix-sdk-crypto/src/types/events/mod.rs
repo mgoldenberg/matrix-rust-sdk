@@ -23,6 +23,7 @@ pub mod forwarded_room_key;
 pub mod olm_v1;
 pub mod room;
 pub mod room_key;
+pub mod room_key_bundle;
 pub mod room_key_request;
 pub mod room_key_withheld;
 pub mod secret_send;
@@ -40,9 +41,10 @@ pub trait EventType {
 
     /// Get the event type of the event content.
     ///
-    /// **Note**: This should never be implemented manually, this takes the
-    /// event type from the constant.
-    fn event_type(&self) -> &'static str {
+    /// **Note**: This usually doesn't need to be implemented. The default
+    /// implementation will take the event type from the
+    /// [`EventType::EVENT_TYPE`] constant.
+    fn event_type(&self) -> &str {
         Self::EVENT_TYPE
     }
 }

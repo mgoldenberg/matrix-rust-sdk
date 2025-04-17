@@ -49,6 +49,7 @@ pub mod events;
 mod one_time_keys;
 pub mod qr_login;
 pub mod requests;
+pub mod room_history;
 
 pub use self::{backup::*, cross_signing::*, device_keys::*, one_time_keys::*};
 use crate::store::BackupDecryptionKey;
@@ -162,7 +163,7 @@ impl BackupSecrets {
 ///
 /// 1. If the claimed algorithm is supported *and* the payload has an expected
 ///    format, the signature will be represent by the enum variant corresponding
-///    to that algorithm. For example, decodeable Ed25519 signatures are
+///    to that algorithm. For example, decodable Ed25519 signatures are
 ///    represented as `Ed25519(...)`.
 /// 2. If the claimed algorithm is unsupported, the signature is represented as
 ///    `Other(...)`.

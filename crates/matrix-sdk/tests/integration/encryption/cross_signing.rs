@@ -13,68 +13,26 @@
 // limitations under the License.
 
 use assert_matches2::assert_let;
-use matrix_sdk::{
-    authentication::matrix::{MatrixSession, MatrixSessionTokens},
-    encryption::CrossSigningResetAuthType,
-    test_utils::no_retry_test_client_with_server,
-    SessionMeta,
-};
+use matrix_sdk::{encryption::CrossSigningResetAuthType, test_utils::mocks::MatrixMockServer};
 use matrix_sdk_test::async_test;
-use ruma::{api::client::uiaa, device_id, user_id};
-use serde_json::json;
-use wiremock::{
-    matchers::{method, path},
-    Mock, ResponseTemplate,
-};
+use ruma::api::client::uiaa;
 
 #[async_test]
 async fn test_reset_legacy_auth() {
-    let user_id = user_id!("@example:morpheus.localhost");
-
-    let session = MatrixSession {
-        meta: SessionMeta { user_id: user_id.into(), device_id: device_id!("DEVICEID").to_owned() },
-        tokens: MatrixSessionTokens { access_token: "1234".to_owned(), refresh_token: None },
-    };
-
-    let (client, server) = no_retry_test_client_with_server().await;
-
-    client.restore_session(session).await.unwrap();
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let user_id = client.user_id().expect("We should be able to access the user ID by now");
 
     assert!(
         !client.encryption().cross_signing_status().await.unwrap().is_complete(),
         "Initially we shouldn't have any cross-signin keys",
     );
 
-    Mock::given(method("POST"))
-        .and(path("/_matrix/client/r0/keys/upload"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "one_time_key_counts": {
-                "signed_curve25519": 50
-            }
-        })))
-        .expect(1)
-        .named("Initial device keys upload")
-        .mount(&server)
-        .await;
+    server.mock_upload_keys().ok().mock_once().mount().await;
 
     let reset_handle = {
-        let _guard = Mock::given(method("POST"))
-            .and(path("/_matrix/client/unstable/keys/device_signing/upload"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
-                "flows": [
-                    {
-                        "stages": [
-                            "m.login.password"
-                        ]
-                    }
-                ],
-                "params": {},
-                "session": "oFIJVvtEOCKmRUTYKTYIIPHL"
-            })))
-            .expect(1)
-            .named("Initial cross-signing upload attempt")
-            .mount_as_scoped(&server)
-            .await;
+        let _guard =
+            server.mock_upload_cross_signing_keys().uiaa().expect(1).mount_as_scoped().await;
 
         client
             .encryption()
@@ -84,29 +42,17 @@ async fn test_reset_legacy_auth() {
             .expect("We should have received a reset handle")
     };
 
-    Mock::given(method("POST"))
-        .and(path("/_matrix/client/unstable/keys/device_signing/upload"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
-        .expect(1)
-        .named("Retrying to upload the cross-signing keys")
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/_matrix/client/unstable/keys/signatures/upload"))
-        .respond_with(move |_: &wiremock::Request| {
-            ResponseTemplate::new(200).set_body_json(json!({}))
-        })
-        .expect(1)
-        .named("Final signatures upload")
-        .mount(&server)
-        .await;
+    server.mock_upload_cross_signing_keys().ok().expect(1).mount().await;
+    server.mock_upload_cross_signing_signatures().ok().expect(1).mount().await;
 
     assert_let!(CrossSigningResetAuthType::Uiaa(uiaa_info) = reset_handle.auth_type());
 
     let mut password = uiaa::Password::new(user_id.to_owned().into(), "1234".to_owned());
     password.session = uiaa_info.session.clone();
-    reset_handle.auth(Some(uiaa::AuthData::Password(password))).await.expect("FOO BAR");
+    reset_handle
+        .auth(Some(uiaa::AuthData::Password(password)))
+        .await
+        .expect("We should be able to reset the cross-signing keys using the reset handle");
 
     assert!(
         client.encryption().cross_signing_status().await.unwrap().is_complete(),
@@ -114,171 +60,104 @@ async fn test_reset_legacy_auth() {
     );
 }
 
-#[cfg(feature = "experimental-oidc")]
 #[async_test]
-async fn test_reset_oidc() {
-    use std::sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc,
-    };
-
-    use assert_matches2::assert_let;
-    use mas_oidc_client::types::{
-        client_credentials::ClientCredentials,
-        iana::oauth::OAuthClientAuthenticationMethod,
-        registration::{ClientMetadata, VerifiedClientMetadata},
-    };
-    use matrix_sdk::{
-        authentication::oidc::{OidcSession, OidcSessionTokens, UserSession},
-        encryption::CrossSigningResetAuthType,
-    };
-    use similar_asserts::assert_eq;
-    use url::Url;
-    use wiremock::MockServer;
-
-    const CLIENT_ID: &str = "test_client_id";
-    const REDIRECT_URI_STRING: &str = "http://matrix.example.com/oidc/callback";
-
-    let (client, server) = no_retry_test_client_with_server().await;
-
-    pub fn mock_registered_client_data() -> (ClientCredentials, VerifiedClientMetadata) {
-        (
-            ClientCredentials::None { client_id: CLIENT_ID.to_owned() },
-            ClientMetadata {
-                redirect_uris: Some(vec![Url::parse(REDIRECT_URI_STRING).unwrap()]),
-                token_endpoint_auth_method: Some(OAuthClientAuthenticationMethod::None),
-                ..ClientMetadata::default()
-            }
-            .validate()
-            .expect("validate client metadata"),
-        )
-    }
-
-    pub fn mock_session(tokens: OidcSessionTokens, server: &MockServer) -> OidcSession {
-        let (credentials, metadata) = mock_registered_client_data();
-        OidcSession {
-            credentials,
-            metadata,
-            user: UserSession {
-                meta: SessionMeta {
-                    user_id: ruma::user_id!("@u:e.uk").to_owned(),
-                    device_id: ruma::device_id!("XYZ").to_owned(),
-                },
-                tokens,
-                issuer: server.uri(),
-            },
-        }
-    }
-
-    let tokens = OidcSessionTokens {
-        access_token: "4cc3ss".to_owned(),
-        refresh_token: Some("r3fr3sh".to_owned()),
-        latest_id_token: None,
-    };
-
-    let session = mock_session(tokens.clone(), &server);
-
-    client
-        .oidc()
-        .restore_session(session.clone())
-        .await
-        .expect("We should be able to restore the OIDC session");
+async fn test_reset_legacy_auth_invalid_password() {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let user_id = client.user_id().expect("We should be able to access the user ID by now");
 
     assert!(
         !client.encryption().cross_signing_status().await.unwrap().is_complete(),
         "Initially we shouldn't have any cross-signin keys",
     );
 
-    Mock::given(method("POST"))
-        .and(path("/_matrix/client/r0/keys/upload"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "one_time_key_counts": {
-                "signed_curve25519": 50
-            }
-        })))
-        .expect(1)
-        .named("Initial device keys upload")
-        .mount(&server)
-        .await;
-
-    let uiaa_response_body = json!({
-        "session": "dummy",
-        "flows": [{
-            "stages": [ "org.matrix.cross_signing_reset" ]
-        }],
-        "params": {
-            "org.matrix.cross_signing_reset": {
-                "url": format!("{}/account/?action=org.matrix.cross_signing_reset", server.uri())
-            }
-        },
-        "msg": "To reset your end-to-end encryption cross-signing identity, you first need to approve it and then try again."
-    });
+    server.mock_upload_keys().ok().mock_once().mount().await;
 
     let reset_handle = {
-        let _guard = Mock::given(method("POST"))
-            .and(path("/_matrix/client/unstable/keys/device_signing/upload"))
-            .respond_with(ResponseTemplate::new(401).set_body_json(uiaa_response_body.clone()))
-            .expect(1)
-            .named("Initial cross-signing upload attempt")
-            .mount_as_scoped(&server)
-            .await;
+        let _guard =
+            server.mock_upload_cross_signing_keys().uiaa().expect(1).mount_as_scoped().await;
 
-        let handle = client
+        client
             .encryption()
             .reset_cross_signing()
             .await
             .unwrap()
-            .expect("We should have received a reset handle");
-
-        assert_let!(CrossSigningResetAuthType::Oidc(oidc_info) = handle.auth_type());
-        assert_eq!(
-            oidc_info.approval_url.as_str(),
-            format!("{}/account/?action=org.matrix.cross_signing_reset", server.uri())
-        );
-
-        handle
+            .expect("We should have received a reset handle")
     };
 
-    let counter = Arc::new(AtomicU8::default());
+    server.mock_upload_cross_signing_keys().uiaa_invalid_password().expect(1).mount().await;
 
-    Mock::given(method("POST"))
-        .and(path("/_matrix/client/unstable/keys/device_signing/upload"))
-        .respond_with({
-            let counter = counter.clone();
+    assert_let!(CrossSigningResetAuthType::Uiaa(uiaa_info) = reset_handle.auth_type());
 
-            move |_: &wiremock::Request| {
-                let current_value = counter.fetch_add(1, Ordering::SeqCst);
+    let mut password = uiaa::Password::new(user_id.to_owned().into(), "wrong-password".to_owned());
+    password.session = uiaa_info.session.clone();
+    reset_handle
+        .auth(Some(uiaa::AuthData::Password(password)))
+        .await
+        .expect_err("Resetting with the wrong password should return the error");
+}
 
-                println!("Hello {current_value}");
-                // Only allow us to proceed on the 5th attempt, count started at 0, so if the
-                // current value is at 4 it's the 5th attempt.
-                if current_value >= 4 {
-                    ResponseTemplate::new(200).set_body_json(json!({}))
-                } else {
-                    ResponseTemplate::new(401).set_body_json(uiaa_response_body.clone())
-                }
-            }
-        })
-        .expect(1..)
-        .named("Retrying to upload the cross-signing keys")
-        .mount(&server)
+#[async_test]
+async fn test_reset_oauth() {
+    use assert_matches2::assert_let;
+    use matrix_sdk::{encryption::CrossSigningResetAuthType, test_utils::mocks::MatrixMockServer};
+    use similar_asserts::assert_eq;
+
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().logged_in_with_oauth().build().await;
+
+    assert!(
+        !client.encryption().cross_signing_status().await.unwrap().is_complete(),
+        "Initially we shouldn't have any cross-signin keys",
+    );
+
+    server.mock_upload_keys().ok().expect(1).named("Initial device keys upload").mount().await;
+
+    // Return the UIAA response 5 times.
+    server
+        .mock_upload_cross_signing_keys()
+        .uiaa_oauth()
+        .up_to_n_times(5)
+        .expect(5)
+        .named("Trying to upload the cross-signing keys with UIAA response")
+        .mount()
         .await;
 
-    Mock::given(method("POST"))
-        .and(path("/_matrix/client/unstable/keys/signatures/upload"))
-        .respond_with(move |_: &wiremock::Request| {
-            ResponseTemplate::new(200).set_body_json(json!({}))
-        })
+    // And finally succeed.
+    // This works because the first mocked endpoint that matches the path is used
+    // until it is invalidated by `up_to_n_times`.
+    server
+        .mock_upload_cross_signing_keys()
+        .ok()
+        .expect(1)
+        .named("Succeeding to upload the cross-signing keys")
+        .mount()
+        .await;
+
+    server
+        .mock_upload_cross_signing_signatures()
+        .ok()
         .expect(1)
         .named("Final signatures upload")
-        .mount(&server)
+        .mount()
         .await;
 
-    reset_handle.auth(None).await.expect("We should be able to reset the cross-signing keys after some attempts, waiting for the auth issue to allow us to upload");
+    // First requests gives us a reset handle.
+    let reset_handle = client
+        .encryption()
+        .reset_cross_signing()
+        .await
+        .unwrap()
+        .expect("We should have received a reset handle");
 
-    // 5 because we incremented the counter once more in the request handler
-    // closure.
-    assert_eq!(counter.load(Ordering::SeqCst), 5);
+    assert_let!(CrossSigningResetAuthType::OAuth(oauth_info) = reset_handle.auth_type());
+    assert_eq!(
+        oauth_info.approval_url.as_str(),
+        format!("{}/account/?action=org.matrix.cross_signing_reset", server.server().uri())
+    );
+
+    // Then it retries until it succeeds.
+    reset_handle.auth(None).await.expect("We should be able to reset the cross-signing keys after some attempts, waiting for the auth issue to allow us to upload");
 
     assert!(
         client.encryption().cross_signing_status().await.unwrap().is_complete(),

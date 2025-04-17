@@ -4,11 +4,14 @@ use assert_matches2::{assert_let, assert_matches};
 use eyeball_im::VectorDiff;
 use futures_util::FutureExt;
 use matrix_sdk::{
-    authentication::matrix::{MatrixSession, MatrixSessionTokens},
+    authentication::oauth::{error::OAuthTokenRevocationError, OAuthError},
     config::{RequestConfig, StoreConfig, SyncSettings},
+    store::RoomLoadSettings,
     sync::RoomUpdate,
-    test_utils::no_retry_test_client_with_server,
-    Client, MemoryStore, SessionMeta, StateChanges, StateStore,
+    test_utils::{
+        client::mock_matrix_session, mocks::MatrixMockServer, no_retry_test_client_with_server,
+    },
+    Client, Error, MemoryStore, StateChanges, StateStore,
 };
 use matrix_sdk_base::{sync::RoomUpdates, RoomState};
 use matrix_sdk_test::{
@@ -346,13 +349,13 @@ async fn test_subscribe_all_room_updates() {
     client.sync_once(sync_settings).await.unwrap();
 
     let room_updates = rx.recv().now_or_never().unwrap().unwrap();
-    assert_let!(RoomUpdates { leave, join, invite, knocked } = room_updates);
+    assert_let!(RoomUpdates { left, joined, invited, knocked } = room_updates);
 
     // Check the left room updates.
     {
-        assert_eq!(leave.len(), 1);
+        assert_eq!(left.len(), 1);
 
-        let (room_id, update) = leave.iter().next().unwrap();
+        let (room_id, update) = left.iter().next().unwrap();
 
         assert_eq!(room_id, *MIXED_LEFT_ROOM_ID);
         assert!(update.state.is_empty());
@@ -362,9 +365,9 @@ async fn test_subscribe_all_room_updates() {
 
     // Check the joined room updates.
     {
-        assert_eq!(join.len(), 1);
+        assert_eq!(joined.len(), 1);
 
-        let (room_id, update) = join.iter().next().unwrap();
+        let (room_id, update) = joined.iter().next().unwrap();
 
         assert_eq!(room_id, *MIXED_JOINED_ROOM_ID);
 
@@ -382,9 +385,9 @@ async fn test_subscribe_all_room_updates() {
 
     // Check the invited room updates.
     {
-        assert_eq!(invite.len(), 1);
+        assert_eq!(invited.len(), 1);
 
-        let (room_id, update) = invite.iter().next().unwrap();
+        let (room_id, update) = invited.iter().next().unwrap();
 
         assert_eq!(room_id, *MIXED_INVITED_ROOM_ID);
         assert_eq!(update.invite_state.events.len(), 2);
@@ -401,9 +404,9 @@ async fn test_subscribe_all_room_updates() {
     }
 }
 
-// Check that the `Room::is_encrypted()` is properly deduplicated, meaning we
-// only make a single request to the server, and that multiple calls do return
-// the same result.
+// Check that the `Room::latest_encryption_state().await?.is_encrypted()` is
+// properly deduplicated, meaning we only make a single request to the server,
+// and that multiple calls do return the same result.
 #[cfg(all(feature = "e2e-encryption", not(target_arch = "wasm32")))]
 #[async_test]
 async fn test_request_encryption_event_before_sending() {
@@ -428,8 +431,8 @@ async fn test_request_encryption_event_before_sending() {
                     "rotation_period_ms": 604800000,
                     "rotation_period_msgs": 100
                 }))
-                // Introduce a delay so the first `is_encrypted()` doesn't finish before we make
-                // the second call.
+                // Introduce a delay so the first `latest_encryption_state()` doesn't finish before
+                // we make the second call.
                 .set_delay(Duration::from_millis(50)),
         )
         .mount(&server)
@@ -437,10 +440,12 @@ async fn test_request_encryption_event_before_sending() {
 
     let first_handle = tokio::spawn({
         let room = room.to_owned();
-        async move { room.to_owned().is_encrypted().await }
+        async move { room.to_owned().latest_encryption_state().await.map(|state| state.is_encrypted()) }
     });
 
-    let second_handle = tokio::spawn(async move { room.is_encrypted().await });
+    let second_handle = tokio::spawn(async move {
+        room.latest_encryption_state().await.map(|state| state.is_encrypted())
+    });
 
     let first_encrypted =
         first_handle.await.unwrap().expect("We should be able to test if the room is encrypted.");
@@ -565,7 +570,7 @@ async fn test_marking_room_as_dm_fails_if_undeserializable() {
 
     let result = client.account().mark_as_dm(&DEFAULT_TEST_ROOM_ID, &users).await;
 
-    assert_matches!(result, Err(matrix_sdk::Error::SerdeJson(_)));
+    assert_matches!(result, Err(Error::SerdeJson(_)));
 
     server.verify().await;
 }
@@ -691,7 +696,10 @@ async fn test_encrypt_room_event() {
         .await;
 
     assert!(
-        room.is_encrypted().await.expect("We should be able to check if the room is encrypted"),
+        room.latest_encryption_state()
+            .await
+            .expect("We should be able to check if the room is encrypted")
+            .is_encrypted(),
         "The room should be encrypted"
     );
 
@@ -930,7 +938,7 @@ async fn test_test_ambiguity_changes() {
 
     let room = client.get_room(&DEFAULT_TEST_ROOM_ID).unwrap();
 
-    let changes = &response.rooms.join.get(*DEFAULT_TEST_ROOM_ID).unwrap().ambiguity_changes;
+    let changes = &response.rooms.joined.get(*DEFAULT_TEST_ROOM_ID).unwrap().ambiguity_changes;
 
     // A new member always triggers an ambiguity change.
     let example_change = changes.get(event_id!("$151800140517rfvjc:localhost")).unwrap();
@@ -1001,7 +1009,7 @@ async fn test_test_ambiguity_changes() {
     let response = client.sync_once(SyncSettings::default()).await.unwrap();
     server.reset().await;
 
-    let changes = &response.rooms.join.get(*DEFAULT_TEST_ROOM_ID).unwrap().ambiguity_changes;
+    let changes = &response.rooms.joined.get(*DEFAULT_TEST_ROOM_ID).unwrap().ambiguity_changes;
 
     // First joined member made both members ambiguous.
     let example_2_change = changes.get(example_2_rename_1_event_id).unwrap();
@@ -1060,7 +1068,7 @@ async fn test_test_ambiguity_changes() {
     let response = client.sync_once(SyncSettings::default()).await.unwrap();
     server.reset().await;
 
-    let changes = &response.rooms.join.get(*DEFAULT_TEST_ROOM_ID).unwrap().ambiguity_changes;
+    let changes = &response.rooms.joined.get(*DEFAULT_TEST_ROOM_ID).unwrap().ambiguity_changes;
 
     // example 2 is not ambiguous anymore.
     let example_2_change = changes.get(example_2_rename_2_event_id).unwrap();
@@ -1106,7 +1114,7 @@ async fn test_test_ambiguity_changes() {
     let response = client.sync_once(SyncSettings::default()).await.unwrap();
     server.reset().await;
 
-    let changes = &response.rooms.join.get(*DEFAULT_TEST_ROOM_ID).unwrap().ambiguity_changes;
+    let changes = &response.rooms.joined.get(*DEFAULT_TEST_ROOM_ID).unwrap().ambiguity_changes;
 
     // example 3 is now ambiguous with example 2, not example.
     let example_3_change = changes.get(example_3_rename_event_id).unwrap();
@@ -1152,7 +1160,7 @@ async fn test_test_ambiguity_changes() {
     let response = client.sync_once(SyncSettings::default()).await.unwrap();
     server.reset().await;
 
-    let changes = &response.rooms.join.get(*DEFAULT_TEST_ROOM_ID).unwrap().ambiguity_changes;
+    let changes = &response.rooms.joined.get(*DEFAULT_TEST_ROOM_ID).unwrap().ambiguity_changes;
 
     // name change, even if still not ambiguous, triggers ambiguity change.
     let example_change = changes.get(example_rename_event_id).unwrap();
@@ -1199,7 +1207,7 @@ async fn test_test_ambiguity_changes() {
     server.reset().await;
 
     // Avatar change does not trigger ambiguity change.
-    assert!(response.rooms.join.get(*DEFAULT_TEST_ROOM_ID).unwrap().ambiguity_changes.is_empty());
+    assert!(response.rooms.joined.get(*DEFAULT_TEST_ROOM_ID).unwrap().ambiguity_changes.is_empty());
 
     let changes = assert_next_matches!(updates, Ok(RoomUpdate::Joined { updates, .. }) => updates.ambiguity_changes);
     assert!(changes.is_empty());
@@ -1382,17 +1390,46 @@ async fn test_restore_room() {
         .unwrap();
     client
         .matrix_auth()
-        .restore_session(MatrixSession {
-            meta: SessionMeta {
-                user_id: user_id!("@example:localhost").to_owned(),
-                device_id: device_id!("DEVICEID").to_owned(),
-            },
-            tokens: MatrixSessionTokens { access_token: "1234".to_owned(), refresh_token: None },
-        })
+        .restore_session(mock_matrix_session(), RoomLoadSettings::default())
         .await
         .unwrap();
 
     let room = client.get_room(room_id).unwrap();
     assert!(room.is_favourite());
     assert!(!room.pinned_event_ids().unwrap().is_empty());
+}
+
+#[async_test]
+async fn test_logout() {
+    let server = MatrixMockServer::new().await;
+
+    // Test unauthenticated client.
+    let unlogged_client = server.client_builder().unlogged().build().await;
+    let res = unlogged_client.logout().await;
+    assert_matches!(res, Err(Error::AuthenticationRequired));
+
+    // Test MatrixAuth.
+    server.mock_logout().ok().mock_once().named("matrix_logout").mount().await;
+
+    let matrix_auth_client = server.client_builder().build().await;
+    matrix_auth_client.logout().await.unwrap();
+
+    // Test OAuth.
+    server
+        .oauth()
+        .mock_server_metadata()
+        .ok()
+        .mock_once()
+        .named("oauth_server_metadata")
+        .mount()
+        .await;
+
+    let oauth_client = server.client_builder().logged_in_with_oauth().build().await;
+    let res = oauth_client.logout().await;
+
+    // This returns an error because it requires a HTTPS server URI, or to be able
+    // to call `OAuth::insecure_rewrite_https_to_http()`, but at least we are
+    // testing the OAuth branch inside `Client::logout()`.
+    assert_matches!(res, Err(Error::OAuth(oauth_error)));
+    assert_matches!(*oauth_error, OAuthError::Logout(OAuthTokenRevocationError::Url(_)));
 }

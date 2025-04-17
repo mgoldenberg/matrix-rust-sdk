@@ -16,10 +16,10 @@
 //!
 //! See [`Timeline`] for details.
 
-use std::{fs, path::PathBuf, pin::Pin, sync::Arc, task::Poll};
+use std::{fs, path::PathBuf, sync::Arc};
 
 use algorithms::rfind_event_by_item_id;
-use event_item::{extract_room_msg_edit_content, TimelineItemHandle};
+use event_item::TimelineItemHandle;
 use eyeball_im::VectorDiff;
 use futures_core::Stream;
 use imbl::Vector;
@@ -28,37 +28,32 @@ use matrix_sdk::{
     event_cache::{EventCacheDropHandles, RoomEventCache},
     event_handler::EventHandlerHandle,
     executor::JoinHandle,
-    room::{edit::EditedContent, Receipts, Room},
+    room::{edit::EditedContent, reply::Reply, Receipts, Room},
     send_queue::{RoomSendQueueError, SendHandle},
     Client, Result,
 };
 use mime::Mime;
-use pin_project_lite::pin_project;
+use pinned_events_loader::PinnedEventsRoom;
 use ruma::{
     api::client::receipt::create_receipt::v3::ReceiptType,
     events::{
         poll::unstable_start::{NewUnstablePollStartEventContent, UnstablePollStartEventContent},
         receipt::{Receipt, ReceiptThread},
         room::{
-            message::{
-                AddMentions, ForwardThread, OriginalRoomMessageEvent,
-                RoomMessageEventContentWithoutRelation,
-            },
+            message::RoomMessageEventContentWithoutRelation,
             pinned_events::RoomPinnedEventsEventContent,
         },
-        AnyMessageLikeEventContent, AnySyncMessageLikeEvent, AnySyncTimelineEvent,
-        SyncMessageLikeEvent,
+        AnyMessageLikeEventContent, AnySyncTimelineEvent,
     },
-    serde::Raw,
-    EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedUserId, RoomVersionId, UserId,
+    EventId, OwnedEventId, RoomVersionId, UserId,
 };
+use subscriber::TimelineWithDropHandle;
 use thiserror::Error;
-use tracing::{error, instrument, trace, warn};
+use tracing::{instrument, trace, warn};
 
 use self::{
     algorithms::rfind_event_by_id, controller::TimelineController, futures::SendAttachment,
 };
-use crate::timeline::pinned_events_loader::PinnedEventsRoom;
 
 mod algorithms;
 mod builder;
@@ -72,7 +67,7 @@ pub mod futures;
 mod item;
 mod pagination;
 mod pinned_events_loader;
-mod reactions;
+mod subscriber;
 #[cfg(test)]
 mod tests;
 mod to_device;
@@ -86,55 +81,16 @@ pub use self::{
     event_item::{
         AnyOtherFullStateEventContent, EncryptedMessage, EventItemOrigin, EventSendState,
         EventTimelineItem, InReplyToDetails, MemberProfileChange, MembershipChange, Message,
-        OtherState, PollResult, PollState, Profile, ReactionInfo, ReactionStatus,
-        ReactionsByKeyBySender, RepliedToEvent, RoomMembershipChange, RoomPinnedEventsChange,
-        Sticker, TimelineDetails, TimelineEventItemId, TimelineItemContent,
+        MsgLikeContent, MsgLikeKind, OtherState, PollResult, PollState, Profile, ReactionInfo,
+        ReactionStatus, ReactionsByKeyBySender, RepliedToEvent, RoomMembershipChange,
+        RoomPinnedEventsChange, Sticker, ThreadSummary, ThreadSummaryLatestEvent, TimelineDetails,
+        TimelineEventItemId, TimelineItemContent,
     },
     event_type_filter::TimelineEventTypeFilter,
     item::{TimelineItem, TimelineItemKind, TimelineUniqueId},
-    pagination::LiveBackPaginationStatus,
     traits::RoomExt,
     virtual_item::VirtualTimelineItem,
 };
-
-/// Information needed to reply to an event.
-#[derive(Debug, Clone)]
-pub struct RepliedToInfo {
-    /// The event ID of the event to reply to.
-    event_id: OwnedEventId,
-    /// The sender of the event to reply to.
-    sender: OwnedUserId,
-    /// The timestamp of the event to reply to.
-    timestamp: MilliSecondsSinceUnixEpoch,
-    /// The content of the event to reply to.
-    content: ReplyContent,
-}
-
-impl RepliedToInfo {
-    /// The event ID of the event to reply to.
-    pub fn event_id(&self) -> &EventId {
-        &self.event_id
-    }
-
-    /// The sender of the event to reply to.
-    pub fn sender(&self) -> &UserId {
-        &self.sender
-    }
-
-    /// The content of the event to reply to.
-    pub fn content(&self) -> &ReplyContent {
-        &self.content
-    }
-}
-
-/// The content of a reply.
-#[derive(Debug, Clone)]
-pub enum ReplyContent {
-    /// Content of a message event.
-    Message(Message),
-    /// Content of any other kind of event stored as raw JSON.
-    Raw(Raw<AnySyncTimelineEvent>),
-}
 
 /// A high-level view into a regular¹ room's contents.
 ///
@@ -231,16 +187,13 @@ impl Timeline {
         session_ids: impl IntoIterator<Item = S>,
     ) {
         self.controller
-            .retry_event_decryption(
-                self.room(),
-                Some(session_ids.into_iter().map(Into::into).collect()),
-            )
+            .retry_event_decryption(Some(session_ids.into_iter().map(Into::into).collect()))
             .await;
     }
 
     #[tracing::instrument(skip(self))]
     async fn retry_decryption_for_all_events(&self) {
-        self.controller.retry_event_decryption(self.room(), None).await;
+        self.controller.retry_event_decryption(None).await;
     }
 
     /// Get the current timeline item for the given event ID, if any.
@@ -275,8 +228,8 @@ impl Timeline {
     pub async fn subscribe(
         &self,
     ) -> (Vector<Arc<TimelineItem>>, impl Stream<Item = Vec<VectorDiff<Arc<TimelineItem>>>>) {
-        let (items, stream) = self.controller.subscribe_batched().await;
-        let stream = TimelineStream::new(stream, self.drop_handle.clone());
+        let (items, stream) = self.controller.subscribe().await;
+        let stream = TimelineWithDropHandle::new(stream, self.drop_handle.clone());
         (items, stream)
     }
 
@@ -319,104 +272,18 @@ impl Timeline {
     ///
     /// * `content` - The content of the reply
     ///
-    /// * `replied_to_info` - A wrapper that contains the event ID, sender,
-    ///   content and timestamp of the event to reply to
+    /// * `event_id` - The ID of the event to reply to
     ///
-    /// * `forward_thread` - Usually `Yes`, unless you explicitly want to the
-    ///   reply to show up in the main timeline even though the `reply_item` is
-    ///   part of a thread
-    #[instrument(skip(self, content, replied_to_info))]
+    /// * `enforce_thread` - Whether to enforce a thread relation on the reply
+    #[instrument(skip(self, content))]
     pub async fn send_reply(
         &self,
         content: RoomMessageEventContentWithoutRelation,
-        replied_to_info: RepliedToInfo,
-        forward_thread: ForwardThread,
-    ) -> Result<(), RoomSendQueueError> {
-        let event_id = replied_to_info.event_id;
-
-        // [The specification](https://spec.matrix.org/v1.10/client-server-api/#user-and-room-mentions) says:
-        //
-        // > Users should not add their own Matrix ID to the `m.mentions` property as
-        // > outgoing messages cannot self-notify.
-        //
-        // If the replied to event has been written by the current user, let's toggle to
-        // `AddMentions::No`.
-        let mention_the_sender = if self.room().own_user_id() == replied_to_info.sender {
-            AddMentions::No
-        } else {
-            AddMentions::Yes
-        };
-
-        let content = match replied_to_info.content {
-            ReplyContent::Message(msg) => {
-                let event = OriginalRoomMessageEvent {
-                    event_id: event_id.to_owned(),
-                    sender: replied_to_info.sender,
-                    origin_server_ts: replied_to_info.timestamp,
-                    room_id: self.room().room_id().to_owned(),
-                    content: msg.to_content(),
-                    unsigned: Default::default(),
-                };
-                content.make_reply_to(&event, forward_thread, mention_the_sender)
-            }
-            ReplyContent::Raw(raw_event) => content.make_reply_to_raw(
-                &raw_event,
-                event_id.to_owned(),
-                self.room().room_id(),
-                forward_thread,
-                mention_the_sender,
-            ),
-        };
-
+        reply: Reply,
+    ) -> Result<(), Error> {
+        let content = self.room().make_reply_event(content, reply).await?;
         self.send(content.into()).await?;
-
         Ok(())
-    }
-
-    /// Get the information needed to reply to the event with the given ID.
-    pub async fn replied_to_info_from_event_id(
-        &self,
-        event_id: &EventId,
-    ) -> Result<RepliedToInfo, UnsupportedReplyItem> {
-        if let Some(timeline_item) = self.item_by_event_id(event_id).await {
-            return timeline_item.replied_to_info();
-        }
-
-        let event = self.room().event(event_id, None).await.map_err(|error| {
-            error!("Failed to fetch event with ID {event_id} with error: {error}");
-            UnsupportedReplyItem::MissingEvent
-        })?;
-
-        let raw_sync_event = event.into_raw();
-        let sync_event = raw_sync_event.deserialize().map_err(|error| {
-            error!("Failed to deserialize event with ID {event_id} with error: {error}");
-            UnsupportedReplyItem::FailedToDeserializeEvent
-        })?;
-
-        let reply_content = match &sync_event {
-            AnySyncTimelineEvent::MessageLike(message_like_event) => {
-                if let AnySyncMessageLikeEvent::RoomMessage(SyncMessageLikeEvent::Original(
-                    original_message,
-                )) = message_like_event
-                {
-                    ReplyContent::Message(Message::from_event(
-                        original_message.content.clone(),
-                        extract_room_msg_edit_content(message_like_event.relations()),
-                        &self.items().await,
-                    ))
-                } else {
-                    ReplyContent::Raw(raw_sync_event)
-                }
-            }
-            AnySyncTimelineEvent::State(_) => return Err(UnsupportedReplyItem::StateEvent),
-        };
-
-        Ok(RepliedToInfo {
-            event_id: event_id.to_owned(),
-            sender: sync_event.sender().to_owned(),
-            timestamp: sync_event.origin_server_ts(),
-            content: reply_content,
-        })
     }
 
     /// Edit an event given its [`TimelineEventItemId`] and some new content.
@@ -449,7 +316,7 @@ impl Timeline {
                 // Relations are filled by the editing code itself.
                 let new_content: AnyMessageLikeEventContent = match new_content {
                     EditedContent::RoomMessage(message) => {
-                        if matches!(item.content, TimelineItemContent::Message(_)) {
+                        if item.content.is_message() {
                             AnyMessageLikeEventContent::RoomMessage(message.into())
                         } else {
                             return Err(EditError::ContentMismatch {
@@ -461,7 +328,7 @@ impl Timeline {
                     }
 
                     EditedContent::PollStart { new_content, .. } => {
-                        if matches!(item.content, TimelineItemContent::Poll(_)) {
+                        if item.content.is_poll() {
                             AnyMessageLikeEventContent::UnstablePollStart(
                                 UnstablePollStartEventContent::New(
                                     NewUnstablePollStartEventContent::new(new_content),
@@ -810,7 +677,7 @@ impl Timeline {
         f: impl Fn(Arc<TimelineItem>) -> Option<U>,
     ) -> (Vector<U>, impl Stream<Item = VectorDiff<U>>) {
         let (items, stream) = self.controller.subscribe_filter_map(f).await;
-        let stream = TimelineStream::new(stream, self.drop_handle.clone());
+        let stream = TimelineWithDropHandle::new(stream, self.drop_handle.clone());
         (items, stream)
     }
 }
@@ -845,31 +712,6 @@ impl Drop for TimelineDropHandle {
         self.room_key_backup_enabled_join_handle.abort();
         self.room_keys_received_join_handle.abort();
         self.encryption_changes_handle.abort();
-    }
-}
-
-pin_project! {
-    struct TimelineStream<S> {
-        #[pin]
-        inner: S,
-        drop_handle: Arc<TimelineDropHandle>,
-    }
-}
-
-impl<S> TimelineStream<S> {
-    fn new(inner: S, drop_handle: Arc<TimelineDropHandle>) -> Self {
-        Self { inner, drop_handle }
-    }
-}
-
-impl<S: Stream> Stream for TimelineStream<S> {
-    type Item = S::Item;
-
-    fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        self.project().inner.poll_next(cx)
     }
 }
 

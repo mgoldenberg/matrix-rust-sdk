@@ -23,7 +23,7 @@ use matrix_sdk_test::{
     async_test, event_factory::EventFactory, mocks::mock_encryption_state, sync_timeline_event,
     GlobalAccountDataTestEvent, JoinedRoomBuilder, SyncResponseBuilder, ALICE, BOB,
 };
-use matrix_sdk_ui::timeline::{RoomExt, TimelineDetails, TimelineItemContent};
+use matrix_sdk_ui::timeline::{RoomExt, TimelineDetails};
 use ruma::{
     event_id,
     events::room::{member::MembershipState, message::MessageType},
@@ -121,7 +121,7 @@ async fn test_event_filter() {
     assert_eq!(first_event.event_id(), Some(first_event_id));
     assert_eq!(first_event.read_receipts().len(), 1, "implicit read receipt");
     assert_matches!(first_event.latest_edit_json(), None);
-    assert_let!(TimelineItemContent::Message(msg) = first_event.content());
+    assert_let!(Some(msg) = first_event.content().as_message());
     assert_matches!(msg.msgtype(), MessageType::Text(_));
     assert!(!msg.is_edited());
 
@@ -186,7 +186,7 @@ async fn test_event_filter() {
     let first_event = first.as_event().unwrap();
     assert!(first_event.read_receipts().is_empty());
     assert_matches!(first_event.latest_edit_json(), Some(_));
-    assert_let!(TimelineItemContent::Message(msg) = first_event.content());
+    assert_let!(Some(msg) = first_event.content().as_message());
     assert_let!(MessageType::Text(text) = msg.msgtype());
     assert_eq!(text.body, "hi");
     assert!(msg.is_edited());
@@ -291,22 +291,19 @@ async fn test_timeline_is_reset_when_a_user_is_ignored_or_unignored() {
     server.reset().await;
 
     assert_let!(Some(timeline_updates) = timeline_stream.next().await);
-    assert_eq!(timeline_updates.len(), 5);
+    assert_eq!(timeline_updates.len(), 4);
 
     // Timeline receives events as before.
-    assert_let!(VectorDiff::Clear = &timeline_updates[0]); // TODO: Remove `RoomEventCacheUpdate::Clear` as it creates double
-                                                           // `VectorDiff::Clear`.
-
-    assert_let!(VectorDiff::PushBack { value } = &timeline_updates[1]);
+    assert_let!(VectorDiff::PushBack { value } = &timeline_updates[0]);
     assert_eq!(value.as_event().unwrap().event_id(), Some(fourth_event_id));
 
-    assert_let!(VectorDiff::Set { index: 0, value } = &timeline_updates[2]);
+    assert_let!(VectorDiff::Set { index: 0, value } = &timeline_updates[1]);
     assert_eq!(value.as_event().unwrap().event_id(), Some(fourth_event_id));
 
-    assert_let!(VectorDiff::PushBack { value } = &timeline_updates[3]);
+    assert_let!(VectorDiff::PushBack { value } = &timeline_updates[2]);
     assert_eq!(value.as_event().unwrap().event_id(), Some(fifth_event_id));
 
-    assert_let!(VectorDiff::PushFront { value } = &timeline_updates[4]);
+    assert_let!(VectorDiff::PushFront { value } = &timeline_updates[3]);
     assert!(value.is_date_divider());
 
     assert_pending!(timeline_stream);

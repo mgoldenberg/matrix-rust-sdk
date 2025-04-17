@@ -5,9 +5,8 @@ use std::{
     time::Duration,
 };
 
-use matrix_sdk_base::sliding_sync::http;
 use matrix_sdk_common::timer;
-use ruma::OwnedRoomId;
+use ruma::{api::client::sync::sync_events::v5 as http, OwnedRoomId};
 use tokio::sync::{broadcast::channel, Mutex as AsyncMutex, RwLock as AsyncRwLock};
 
 use super::{
@@ -233,7 +232,7 @@ impl SlidingSyncBuilder {
         let version = self.version.unwrap_or_else(|| client.sliding_sync_version());
 
         if matches!(version, Version::None) {
-            return Err(crate::error::Error::SlidingSync(Error::VersionIsMissing));
+            return Err(crate::error::Error::SlidingSync(Box::new(Error::VersionIsMissing)));
         }
 
         let (internal_channel_sender, _internal_channel_receiver) = channel(8);
@@ -271,7 +270,6 @@ impl SlidingSyncBuilder {
 
         Ok(SlidingSync::new(SlidingSyncInner {
             id: self.id,
-            version,
 
             client,
             storage_key: self.storage_key,

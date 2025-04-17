@@ -39,8 +39,9 @@ use super::TestTimeline;
 use crate::timeline::{
     controller::TimelineSettings,
     event_item::{AnyOtherFullStateEventContent, RemoteEventOrigin},
-    tests::{ReadReceiptMap, TestRoomDataProvider},
-    MembershipChange, TimelineDetails, TimelineItemContent, TimelineItemKind, VirtualTimelineItem,
+    tests::{ReadReceiptMap, TestRoomDataProvider, TestTimelineBuilder},
+    MembershipChange, MsgLikeContent, MsgLikeKind, TimelineDetails, TimelineItemContent,
+    TimelineItemKind, VirtualTimelineItem,
 };
 
 #[async_test]
@@ -86,13 +87,15 @@ async fn test_replace_with_initial_events_and_read_marker() {
         .entry(ALICE.to_owned())
         .or_insert_with(|| (event_id.to_owned(), Receipt::new(MilliSecondsSinceUnixEpoch::now())));
 
-    let timeline = TestTimeline::with_room_data_provider(
-        TestRoomDataProvider::default()
-            // Also add a fully read marker.
-            .with_fully_read_marker(event_id)
-            .with_initial_user_receipts(receipts),
-    )
-    .with_settings(TimelineSettings { track_read_receipts: true, ..Default::default() });
+    let timeline = TestTimelineBuilder::new()
+        .provider(
+            TestRoomDataProvider::default()
+                // Also add a fully read marker.
+                .with_fully_read_marker(event_id)
+                .with_initial_user_receipts(receipts),
+        )
+        .settings(TimelineSettings { track_read_receipts: true, ..Default::default() })
+        .build();
 
     let f = &timeline.factory;
     let ev = f.text_msg("hey").sender(*ALICE).into_event();
@@ -147,7 +150,7 @@ async fn test_sticker() {
         .await;
 
     let item = assert_next_matches!(stream, VectorDiff::PushBack { value } => value);
-    assert_matches!(item.content(), TimelineItemContent::Sticker(_));
+    assert!(item.content().is_sticker());
 }
 
 #[async_test]
@@ -279,7 +282,7 @@ async fn test_other_state() {
 
 #[async_test]
 async fn test_internal_id_prefix() {
-    let timeline = TestTimeline::with_internal_id_prefix("le_prefix_".to_owned());
+    let timeline = TestTimelineBuilder::new().internal_id_prefix("le_prefix_".to_owned()).build();
 
     let f = &timeline.factory;
     let ev_a = f.text_msg("A").sender(*ALICE).into_event();
@@ -342,7 +345,7 @@ async fn test_sanitized() {
 
     let item = assert_next_matches!(stream, VectorDiff::PushBack { value } => value);
     let event = item.as_event().unwrap();
-    assert_let!(TimelineItemContent::Message(message) = event.content());
+    assert_let!(Some(message) = event.content().as_message());
     assert_let!(MessageType::Text(text) = message.msgtype());
     assert_eq!(
         text.formatted.as_ref().unwrap().body,
@@ -397,13 +400,19 @@ async fn test_reply() {
         .await;
 
     let item = assert_next_matches!(stream, VectorDiff::PushBack { value } => value);
-    assert_let!(TimelineItemContent::Message(message) = item.as_event().unwrap().content());
+    assert_let!(
+        TimelineItemContent::MsgLike(MsgLikeContent {
+            kind: MsgLikeKind::Message(message),
+            in_reply_to,
+            ..
+        }) = item.as_event().unwrap().content()
+    );
 
     assert_let!(MessageType::Text(text) = message.msgtype());
     assert_eq!(text.body, "I'm replying!");
     assert_eq!(text.formatted.as_ref().unwrap().body, "<p>I'm replying!</p>");
 
-    let in_reply_to = message.in_reply_to().unwrap();
+    let in_reply_to = in_reply_to.clone().unwrap();
     assert_eq!(in_reply_to.event_id, first_event_id);
     assert_let!(TimelineDetails::Ready(replied_to_event) = &in_reply_to.event);
     assert_eq!(replied_to_event.sender(), *ALICE);
@@ -433,13 +442,19 @@ async fn test_thread() {
         .await;
 
     let item = assert_next_matches!(stream, VectorDiff::PushBack { value } => value);
-    assert_let!(TimelineItemContent::Message(message) = item.as_event().unwrap().content());
+    assert_let!(
+        TimelineItemContent::MsgLike(MsgLikeContent {
+            kind: MsgLikeKind::Message(message),
+            in_reply_to,
+            ..
+        }) = item.as_event().unwrap().content()
+    );
 
     assert_let!(MessageType::Text(text) = message.msgtype());
     assert_eq!(text.body, "I'm replying in a thread");
     assert_matches!(text.formatted, None);
 
-    let in_reply_to = message.in_reply_to().unwrap();
+    let in_reply_to = in_reply_to.clone().unwrap();
     assert_eq!(in_reply_to.event_id, first_event_id);
     assert_let!(TimelineDetails::Ready(replied_to_event) = &in_reply_to.event);
     assert_eq!(replied_to_event.sender(), *ALICE);
@@ -447,8 +462,10 @@ async fn test_thread() {
 
 #[async_test]
 async fn test_replace_with_initial_events_when_batched() {
-    let timeline = TestTimeline::with_room_data_provider(TestRoomDataProvider::default())
-        .with_settings(TimelineSettings::default());
+    let timeline = TestTimelineBuilder::new()
+        .provider(TestRoomDataProvider::default())
+        .settings(TimelineSettings::default())
+        .build();
 
     let f = &timeline.factory;
     let ev = f.text_msg("hey").sender(*ALICE).into_event();
@@ -461,7 +478,7 @@ async fn test_replace_with_initial_events_when_batched() {
         )
         .await;
 
-    let (items, mut stream) = timeline.controller.subscribe_batched().await;
+    let (items, mut stream) = timeline.controller.subscribe().await;
     assert_eq!(items.len(), 2);
     assert!(items[0].is_date_divider());
     assert_eq!(items[1].as_event().unwrap().content().as_message().unwrap().body(), "hey");

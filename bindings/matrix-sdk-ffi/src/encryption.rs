@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use async_compat::get_runtime_handle;
 use futures_util::StreamExt;
 use matrix_sdk::{
     encryption,
@@ -9,7 +10,6 @@ use thiserror::Error;
 use tracing::{error, info};
 use zeroize::Zeroize;
 
-use super::RUNTIME;
 use crate::{client::Client, error::ClientError, ruma::AuthData, task_handle::TaskHandle};
 
 #[derive(uniffi::Object)]
@@ -230,7 +230,7 @@ impl Encryption {
     pub fn backup_state_listener(&self, listener: Box<dyn BackupStateListener>) -> Arc<TaskHandle> {
         let mut stream = self.inner.backups().state_stream();
 
-        let stream_task = TaskHandle::new(RUNTIME.spawn(async move {
+        let stream_task = TaskHandle::new(get_runtime_handle().spawn(async move {
             while let Some(state) = stream.next().await {
                 let Ok(state) = state else { continue };
                 listener.on_update(state.into());
@@ -267,7 +267,7 @@ impl Encryption {
     ) -> Arc<TaskHandle> {
         let mut stream = self.inner.recovery().state_stream();
 
-        let stream_task = TaskHandle::new(RUNTIME.spawn(async move {
+        let stream_task = TaskHandle::new(get_runtime_handle().spawn(async move {
             while let Some(state) = stream.next().await {
                 listener.on_update(state.into());
             }
@@ -294,7 +294,7 @@ impl Encryption {
         let task = if let Some(listener) = progress_listener {
             let mut progress_stream = wait_for_steady_state.subscribe_to_progress();
 
-            Some(RUNTIME.spawn(async move {
+            Some(get_runtime_handle().spawn(async move {
                 while let Some(progress) = progress_stream.next().await {
                     let Ok(progress) = progress else { continue };
                     listener.on_update(progress.into());
@@ -335,7 +335,7 @@ impl Encryption {
 
         let mut progress_stream = enable.subscribe_to_progress();
 
-        let task = RUNTIME.spawn(async move {
+        let task = get_runtime_handle().spawn(async move {
             while let Some(progress) = progress_stream.next().await {
                 let Ok(progress) = progress else { continue };
                 progress_listener.on_update(progress.into());
@@ -369,12 +369,8 @@ impl Encryption {
     /// Completely reset the current user's crypto identity: reset the cross
     /// signing keys, delete the existing backup and recovery key.
     pub async fn reset_identity(&self) -> Result<Option<Arc<IdentityResetHandle>>, ClientError> {
-        if let Some(reset_handle) = self
-            .inner
-            .recovery()
-            .reset_identity()
-            .await
-            .map_err(|e| ClientError::Generic { msg: e.to_string() })?
+        if let Some(reset_handle) =
+            self.inner.recovery().reset_identity().await.map_err(ClientError::from_err)?
         {
             return Ok(Some(Arc::new(IdentityResetHandle { inner: reset_handle })));
         }
@@ -400,7 +396,7 @@ impl Encryption {
     ) -> Arc<TaskHandle> {
         let mut subscriber = self.inner.verification_state();
 
-        Arc::new(TaskHandle::new(RUNTIME.spawn(async move {
+        Arc::new(TaskHandle::new(get_runtime_handle().spawn(async move {
             while let Some(verification_state) = subscriber.next().await {
                 listener.on_update(verification_state.into());
             }
@@ -478,15 +474,6 @@ impl UserIdentity {
         Ok(self.inner.pin().await?)
     }
 
-    /// Remove the requirement for this identity to be verified.
-    ///
-    /// If an identity was previously verified and is not anymore it will be
-    /// reported to the user. In order to remove this notice users have to
-    /// verify again or to withdraw the verification requirement.
-    pub(crate) async fn withdraw_verification(&self) -> Result<(), ClientError> {
-        Ok(self.inner.withdraw_verification().await?)
-    }
-
     /// Get the public part of the Master key of this user identity.
     ///
     /// The public part of the Master key is usually used to uniquely identify
@@ -503,6 +490,28 @@ impl UserIdentity {
     /// be verified as well for the identity to be considered to be verified.
     pub fn is_verified(&self) -> bool {
         self.inner.is_verified()
+    }
+
+    /// True if we verified this identity at some point in the past.
+    ///
+    /// To reset this latch back to `false`, one must call
+    /// [`UserIdentity::withdraw_verification()`].
+    pub fn was_previously_verified(&self) -> bool {
+        self.inner.was_previously_verified()
+    }
+
+    /// Remove the requirement for this identity to be verified.
+    ///
+    /// If an identity was previously verified and is not anymore it will be
+    /// reported to the user. In order to remove this notice users have to
+    /// verify again or to withdraw the verification requirement.
+    pub(crate) async fn withdraw_verification(&self) -> Result<(), ClientError> {
+        Ok(self.inner.withdraw_verification().await?)
+    }
+
+    /// Was this identity previously verified, and is no longer?
+    pub fn has_verification_violation(&self) -> bool {
+        self.inner.has_verification_violation()
     }
 }
 
@@ -528,12 +537,9 @@ impl IdentityResetHandle {
     /// 4. Finally, re-enable key backups only if they were enabled before
     pub async fn reset(&self, auth: Option<AuthData>) -> Result<(), ClientError> {
         if let Some(auth) = auth {
-            self.inner
-                .reset(Some(auth.into()))
-                .await
-                .map_err(|e| ClientError::Generic { msg: e.to_string() })
+            self.inner.reset(Some(auth.into())).await.map_err(ClientError::from_err)
         } else {
-            self.inner.reset(None).await.map_err(|e| ClientError::Generic { msg: e.to_string() })
+            self.inner.reset(None).await.map_err(ClientError::from_err)
         }
     }
 
@@ -557,7 +563,7 @@ impl From<&matrix_sdk::encryption::CrossSigningResetAuthType> for CrossSigningRe
     fn from(value: &matrix_sdk::encryption::CrossSigningResetAuthType) -> Self {
         match value {
             encryption::CrossSigningResetAuthType::Uiaa(_) => Self::Uiaa,
-            encryption::CrossSigningResetAuthType::Oidc(info) => Self::Oidc { info: info.into() },
+            encryption::CrossSigningResetAuthType::OAuth(info) => Self::Oidc { info: info.into() },
         }
     }
 }
@@ -568,8 +574,8 @@ pub struct OidcCrossSigningResetInfo {
     pub approval_url: String,
 }
 
-impl From<&matrix_sdk::encryption::OidcCrossSigningResetInfo> for OidcCrossSigningResetInfo {
-    fn from(value: &matrix_sdk::encryption::OidcCrossSigningResetInfo) -> Self {
+impl From<&matrix_sdk::encryption::OAuthCrossSigningResetInfo> for OidcCrossSigningResetInfo {
+    fn from(value: &matrix_sdk::encryption::OAuthCrossSigningResetInfo) -> Self {
         Self { approval_url: value.approval_url.to_string() }
     }
 }

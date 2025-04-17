@@ -24,8 +24,8 @@ pub use bytes;
 pub use matrix_sdk_base::crypto;
 pub use matrix_sdk_base::{
     deserialized_responses,
-    store::{DynStateStore, MemoryStore, StateStoreExt},
-    ComposerDraft, ComposerDraftType, QueueWedgeError, Room as BaseRoom,
+    store::{self, DynStateStore, MemoryStore, StateStoreExt},
+    ComposerDraft, ComposerDraftType, EncryptionState, QueueWedgeError, Room as BaseRoom,
     RoomCreateWithCreatorEventContent, RoomDisplayName, RoomHero, RoomInfo,
     RoomMember as BaseRoomMember, RoomMemberships, RoomState, SessionMeta, StateChanges,
     StateStore, StoreError,
@@ -76,7 +76,7 @@ pub use http_client::TransmissionProgress;
 #[cfg(all(feature = "e2e-encryption", feature = "sqlite"))]
 pub use matrix_sdk_sqlite::SqliteCryptoStore;
 #[cfg(feature = "sqlite")]
-pub use matrix_sdk_sqlite::{SqliteEventCacheStore, SqliteStateStore};
+pub use matrix_sdk_sqlite::{SqliteEventCacheStore, SqliteStateStore, SqliteStoreConfig};
 pub use media::Media;
 pub use pusher::Pusher;
 pub use room::Room;

@@ -6,6 +6,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - ReleaseDate
 
+## [0.11.0] - 2025-04-11
+
+No notable changes in this release.
+
+## [0.10.0] - 2025-02-04
+
 ### Bug Fixes
 
 - Remove the usage of an unwrap in the `StoreCipher::import_with_key` method.

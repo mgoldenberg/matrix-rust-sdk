@@ -19,12 +19,12 @@ use std::{
     time::Duration,
 };
 
-use backoff::{future::retry, Error as RetryError, ExponentialBackoff};
+use backon::{ExponentialBuilder, Retryable};
 use bytes::Bytes;
 use bytesize::ByteSize;
 use eyeball::SharedObservable;
 use http::header::CONTENT_LENGTH;
-use reqwest::Certificate;
+use reqwest::{tls, Certificate};
 use ruma::api::{error::FromHttpResponseError, IncomingResponse, OutgoingRequest};
 use tracing::{debug, info, warn};
 
@@ -45,76 +45,97 @@ impl HttpClient {
         R: OutgoingRequest + Debug,
         HttpError: From<FromHttpResponseError<R::EndpointError>>,
     {
-        let backoff =
-            ExponentialBackoff { max_elapsed_time: config.retry_timeout, ..Default::default() };
+        // These values were picked because we used to use the `backoff` crate, those
+        // were defined here: https://docs.rs/backoff/0.4.0/backoff/default/index.html
+        let backoff = ExponentialBuilder::new()
+            .with_min_delay(Duration::from_millis(500))
+            .with_max_delay(Duration::from_secs(60))
+            .with_total_delay(Some(Duration::from_secs(15 * 60)))
+            .without_max_times();
+
+        // Let's now apply any override the user or the SDK might have set.
+        let backoff = if let Some(max_delay) = config.max_retry_time {
+            backoff.with_max_delay(max_delay)
+        } else {
+            backoff
+        };
+
+        let backoff = if let Some(max_times) = config.retry_limit {
+            // Backon behaves a bit differently to our own handcrafted max retry logic.
+            // We were counting from one while `backon` counts from zero.
+            backoff.with_max_times(max_times.saturating_sub(1))
+        } else {
+            backoff
+        };
+
         let retry_count = AtomicU64::new(1);
 
         let send_request = || {
             let send_progress = send_progress.clone();
+
             async {
-                debug!(num_attempt = retry_count.load(Ordering::SeqCst), "Sending request");
+                let num_attempt = retry_count.fetch_add(1, Ordering::SeqCst);
+                debug!(num_attempt, "Sending request");
 
-                let stop = if let Some(retry_limit) = config.retry_limit {
-                    retry_count.fetch_add(1, Ordering::Relaxed) >= retry_limit
-                } else {
-                    false
-                };
-
-                // Turn errors into permanent errors when the retry limit is reached.
-                let error_type = |err: HttpError| {
-                    if stop {
-                        RetryError::Permanent(err)
-                    } else {
-                        let has_retry_limit = config.retry_limit.is_some();
-                        match err.retry_kind() {
-                            RetryKind::Transient { retry_after } => {
-                                RetryError::Transient { err, retry_after }
-                            }
-                            RetryKind::Permanent => RetryError::Permanent(err),
-                            RetryKind::NetworkFailure => {
-                                // If we ran into a network failure, only retry if there's some
-                                // retry limit associated to this request's configuration;
-                                // otherwise, we would end up running an infinite loop of network
-                                // requests in offline mode.
-                                if has_retry_limit {
-                                    RetryError::Transient { err, retry_after: None }
-                                } else {
-                                    RetryError::Permanent(err)
-                                }
-                            }
-                        }
-                    }
-                };
-
-                let response = send_request(&self.inner, &request, config.timeout, send_progress)
-                    .await
-                    .map_err(error_type)?;
+                let response =
+                    send_request(&self.inner, &request, config.timeout, send_progress).await?;
 
                 let status_code = response.status();
                 let response_size = ByteSize(response.body().len().try_into().unwrap_or(u64::MAX));
                 tracing::Span::current()
                     .record("status", status_code.as_u16())
-                    .record("response_size", response_size.to_string_as(true));
+                    .record("response_size", response_size.display().si_short().to_string());
 
                 // Record interesting headers. If you add more headers, ensure they're not
                 // confidential.
                 for (header_name, header_value) in response.headers() {
                     let header_name = header_name.as_str().to_lowercase();
 
-                    // Header added in case of OIDC authentication failure, so we can correlate
-                    // failures with a Sentry event emitted by the OIDC authentication server.
+                    // Header added in case of OAuth 2.0 authentication failure, so we can correlate
+                    // failures with a Sentry event emitted by the OAuth 2.0 authentication server.
                     if header_name == "x-sentry-event-id" {
                         tracing::Span::current()
                             .record("sentry_event_id", header_value.to_str().unwrap_or("<???>"));
                     }
                 }
 
-                R::IncomingResponse::try_from_http_response(response)
-                    .map_err(|e| error_type(HttpError::from(e)))
+                R::IncomingResponse::try_from_http_response(response).map_err(HttpError::from)
             }
         };
 
-        retry::<_, HttpError, _, _, _>(backoff, send_request).await
+        let has_retry_limit = config.retry_limit.is_some();
+
+        send_request
+            .retry(backoff)
+            .adjust(|err, default_timeout| {
+                match err.retry_kind() {
+                    RetryKind::Transient { retry_after } => {
+                        // This bit is somewhat tricky but it's necessary so we respect the
+                        // `max_times` limit from `backon`.
+                        //
+                        // The exponential backoff in `backon` is implemented as an iterator that
+                        // returns `None` when we hit the `max_times` limit. So it's necessary to
+                        // only override the `default_timeout` if it's `Some`.
+                        if default_timeout.is_some() {
+                            retry_after.or(default_timeout)
+                        } else {
+                            None
+                        }
+                    }
+                    RetryKind::Permanent => None,
+                    RetryKind::NetworkFailure => {
+                        // If we ran into a network failure, only retry if there's some retry limit
+                        // associated to this request's configuration; otherwise, we would end up
+                        // running an infinite loop of network requests in offline mode.
+                        if has_retry_limit {
+                            default_timeout
+                        } else {
+                            None
+                        }
+                    }
+                }
+            })
+            .await
     }
 }
 
@@ -148,8 +169,12 @@ impl HttpSettings {
     /// Build a client with the specified configuration.
     pub(crate) fn make_client(&self) -> Result<reqwest::Client, HttpError> {
         let user_agent = self.user_agent.clone().unwrap_or_else(|| "matrix-rust-sdk".to_owned());
-        let mut http_client =
-            reqwest::Client::builder().user_agent(user_agent).timeout(self.timeout);
+        let mut http_client = reqwest::Client::builder()
+            .user_agent(user_agent)
+            .timeout(self.timeout)
+            // As recommended by BCP 195.
+            // See: https://datatracker.ietf.org/doc/bcp195/
+            .min_tls_version(tls::Version::TLS_1_2);
 
         if self.disable_ssl_verification {
             warn!("SSL verification disabled in the HTTP client!");
@@ -191,7 +216,7 @@ pub(super) async fn send_request(
 
     use futures_util::stream;
 
-    let request = clone_request(request);
+    let request = request.clone();
     let request = {
         let mut request = if send_progress.subscriber_count() != 0 {
             let content_length = request.body().len();
@@ -228,17 +253,6 @@ pub(super) async fn send_request(
 
     let response = client.execute(request).await?;
     Ok(response_to_http_response(response).await?)
-}
-
-// Clones all request parts except the extensions which can't be cloned.
-// See also https://github.com/hyperium/http/issues/395
-fn clone_request(request: &http::Request<Bytes>) -> http::Request<Bytes> {
-    let mut builder = http::Request::builder()
-        .version(request.version())
-        .method(request.method())
-        .uri(request.uri());
-    *builder.headers_mut().unwrap() = request.headers().clone();
-    builder.body(request.body().clone()).unwrap()
 }
 
 struct BytesChunks {

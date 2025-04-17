@@ -66,10 +66,12 @@ use matrix_sdk::{
     event_cache::EventCacheError, timeout::timeout, Client, Error as SlidingSyncError, SlidingSync,
     SlidingSyncList, SlidingSyncMode,
 };
-use matrix_sdk_base::sliding_sync::http;
 pub use room::*;
 pub use room_list::*;
-use ruma::{assign, directory::RoomTypeFilter, events::StateEventType, OwnedRoomId, RoomId, UInt};
+use ruma::{
+    api::client::sync::sync_events::v5 as http, assign, directory::RoomTypeFilter,
+    events::StateEventType, OwnedRoomId, RoomId, UInt,
+};
 pub use state::*;
 use thiserror::Error;
 use tracing::debug;
@@ -159,7 +161,6 @@ impl RoomListService {
                             .map(|(state_event, value)| (state_event.clone(), (*value).to_owned()))
                             .collect(),
                     )
-                    .include_heroes(Some(true))
                     .filters(Some(assign!(http::request::ListFilters::default(), {
                         // As defined in the [SlidingSync MSC](https://github.com/matrix-org/matrix-spec-proposals/blob/9450ced7fb9cf5ea9077d029b3adf36aebfa8709/proposals/3575-sync.md?plain=1#L444)
                         // If unset, both invited and joined rooms are returned. If false, no invited rooms are
@@ -466,31 +467,19 @@ pub enum SyncIndicator {
 mod tests {
     use std::future::ready;
 
-    use assert_matches::assert_matches;
     use futures_util::{pin_mut, StreamExt};
     use matrix_sdk::{
-        authentication::matrix::{MatrixSession, MatrixSessionTokens},
-        config::RequestConfig,
-        reqwest::Url,
-        sliding_sync::Version as SlidingSyncVersion,
-        Client, SlidingSyncMode,
+        config::RequestConfig, test_utils::client::mock_matrix_session, Client, SlidingSyncMode,
     };
-    use matrix_sdk_base::SessionMeta;
     use matrix_sdk_test::async_test;
-    use ruma::{api::MatrixVersion, device_id, user_id};
+    use ruma::api::MatrixVersion;
     use serde_json::json;
     use wiremock::{http::Method, Match, Mock, MockServer, Request, ResponseTemplate};
 
     use super::{Error, RoomListService, State, ALL_ROOMS_LIST_NAME};
 
     async fn new_client() -> (Client, MockServer) {
-        let session = MatrixSession {
-            meta: SessionMeta {
-                user_id: user_id!("@example:localhost").to_owned(),
-                device_id: device_id!("DEVICEID").to_owned(),
-            },
-            tokens: MatrixSessionTokens { access_token: "1234".to_owned(), refresh_token: None },
-        };
+        let session = mock_matrix_session();
 
         let server = MockServer::start().await;
         let client = Client::builder()
@@ -518,31 +507,6 @@ mod tests {
             request.url.path() == "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync"
                 && request.method == Method::POST
         }
-    }
-
-    #[async_test]
-    async fn test_sliding_sync_proxy_url() -> Result<(), Error> {
-        let (client, _) = new_client().await;
-
-        {
-            let room_list = RoomListService::new(client.clone()).await?;
-            assert_matches!(room_list.sliding_sync().version(), SlidingSyncVersion::Native);
-        }
-
-        {
-            let url = Url::parse("https://foo.matrix/").unwrap();
-            client.set_sliding_sync_version(SlidingSyncVersion::Proxy { url: url.clone() });
-
-            let room_list = RoomListService::new(client.clone()).await?;
-            assert_matches!(
-                room_list.sliding_sync().version(),
-                SlidingSyncVersion::Proxy { url: given_url } => {
-                    assert_eq!(&url, given_url);
-                }
-            );
-        }
-
-        Ok(())
     }
 
     #[async_test]

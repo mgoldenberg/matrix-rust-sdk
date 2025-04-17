@@ -1,16 +1,16 @@
 use matrix_sdk::{
-    authentication::matrix::{MatrixSession, MatrixSessionTokens},
     config::RequestConfig,
     media::{MediaFormat, MediaRequestParameters, MediaThumbnailSettings},
-    test_utils::logged_in_client_with_server,
-    Client, SessionMeta,
+    store::RoomLoadSettings,
+    test_utils::{client::mock_matrix_session, logged_in_client_with_server},
+    Client,
 };
 use matrix_sdk_test::async_test;
 use ruma::{
     api::client::media::get_content_thumbnail::v3::Method,
-    assign, device_id,
+    assign,
     events::room::{message::ImageMessageEventContent, ImageInfo, MediaSource},
-    mxc_uri, owned_mxc_uri, uint, user_id,
+    mxc_uri, owned_mxc_uri, uint,
 };
 use serde_json::json;
 use wiremock::{
@@ -218,13 +218,7 @@ async fn test_get_media_file_with_auth_matrix_1_11() {
     // Restore session.
     client
         .matrix_auth()
-        .restore_session(MatrixSession {
-            meta: SessionMeta {
-                user_id: user_id!("@example:localhost").to_owned(),
-                device_id: device_id!("DEVICEID").to_owned(),
-            },
-            tokens: MatrixSessionTokens { access_token: "1234".to_owned(), refresh_token: None },
-        })
+        .restore_session(mock_matrix_session(), RoomLoadSettings::default())
         .await
         .unwrap();
 
@@ -333,13 +327,7 @@ async fn test_get_media_file_with_auth_matrix_stable_feature() {
     // Restore session.
     client
         .matrix_auth()
-        .restore_session(MatrixSession {
-            meta: SessionMeta {
-                user_id: user_id!("@example:localhost").to_owned(),
-                device_id: device_id!("DEVICEID").to_owned(),
-            },
-            tokens: MatrixSessionTokens { access_token: "1234".to_owned(), refresh_token: None },
-        })
+        .restore_session(mock_matrix_session(), RoomLoadSettings::default())
         .await
         .unwrap();
 

@@ -134,18 +134,8 @@ impl HttpClient {
 
     #[allow(clippy::too_many_arguments)]
     #[instrument(
-        skip(self, request, config, homeserver, access_token, send_progress),
-        fields(
-            config,
-            uri,
-            method,
-            request_size,
-            request_body,
-            request_id,
-            status,
-            response_size,
-            sentry_event_id,
-        )
+        skip(self, request, config, homeserver, access_token, server_versions, send_progress),
+        fields(uri, method, request_size, request_id, status, response_size, sentry_event_id)
     )]
     pub async fn send<R>(
         &self,
@@ -205,7 +195,10 @@ impl HttpClient {
             // in conjunction with request bodies
             if [Method::POST, Method::PUT, Method::PATCH].contains(method) {
                 let request_size = request.body().len().try_into().unwrap_or(u64::MAX);
-                span.record("request_size", ByteSize(request_size).to_string_as(true));
+                span.record(
+                    "request_size",
+                    ByteSize(request_size).display().si_short().to_string(),
+                );
             }
 
             request
@@ -255,31 +248,6 @@ async fn response_to_http_response(
     let body = response.bytes().await?;
 
     Ok(http_builder.body(body).expect("Can't construct a response using the given body"))
-}
-
-#[cfg(feature = "experimental-oidc")]
-impl tower::Service<http::Request<Bytes>> for HttpClient {
-    type Response = http::Response<Bytes>;
-    type Error = tower::BoxError;
-    type Future = matrix_sdk_base::BoxFuture<'static, Result<Self::Response, Self::Error>>;
-
-    fn poll_ready(
-        &mut self,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Result<(), Self::Error>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: http::Request<Bytes>) -> Self::Future {
-        let inner = self.inner.clone();
-
-        let fut = async move {
-            native::send_request(&inner, &req, DEFAULT_REQUEST_TIMEOUT, Default::default())
-                .await
-                .map_err(Into::into)
-        };
-        Box::pin(fut)
-    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

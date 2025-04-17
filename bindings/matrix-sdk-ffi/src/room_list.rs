@@ -2,6 +2,7 @@
 
 use std::{fmt::Debug, mem::MaybeUninit, ptr::addr_of_mut, sync::Arc, time::Duration};
 
+use async_compat::get_runtime_handle;
 use eyeball_im::VectorDiff;
 use futures_util::{pin_mut, StreamExt, TryFutureExt};
 use matrix_sdk::ruma::{
@@ -26,10 +27,9 @@ use crate::{
     room::{Membership, Room},
     room_info::RoomInfo,
     room_preview::RoomPreview,
-    timeline::{EventTimelineItem, Timeline},
-    timeline_event_filter::TimelineEventTypeFilter,
+    timeline::{configuration::TimelineEventTypeFilter, EventTimelineItem, Timeline},
     utils::AsyncRuntimeDropped,
-    TaskHandle, RUNTIME,
+    TaskHandle,
 };
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
@@ -92,7 +92,7 @@ impl RoomListService {
     fn state(&self, listener: Box<dyn RoomListServiceStateListener>) -> Arc<TaskHandle> {
         let state_stream = self.inner.state();
 
-        Arc::new(TaskHandle::new(RUNTIME.spawn(async move {
+        Arc::new(TaskHandle::new(get_runtime_handle().spawn(async move {
             pin_mut!(state_stream);
 
             while let Some(state) = state_stream.next().await {
@@ -128,7 +128,7 @@ impl RoomListService {
             Duration::from_millis(delay_before_hiding_in_ms.into()),
         );
 
-        Arc::new(TaskHandle::new(RUNTIME.spawn(async move {
+        Arc::new(TaskHandle::new(get_runtime_handle().spawn(async move {
             pin_mut!(sync_indicator_stream);
 
             while let Some(sync_indicator) = sync_indicator_stream.next().await {
@@ -167,7 +167,7 @@ impl RoomList {
 
         Ok(RoomListLoadingStateResult {
             state: loading_state.get().into(),
-            state_stream: Arc::new(TaskHandle::new(RUNTIME.spawn(async move {
+            state_stream: Arc::new(TaskHandle::new(get_runtime_handle().spawn(async move {
                 pin_mut!(loading_state);
 
                 while let Some(loading_state) = loading_state.next().await {
@@ -237,7 +237,7 @@ impl RoomList {
         let dynamic_entries_controller =
             Arc::new(RoomListDynamicEntriesController::new(dynamic_entries_controller));
 
-        let entries_stream = Arc::new(TaskHandle::new(RUNTIME.spawn(async move {
+        let entries_stream = Arc::new(TaskHandle::new(get_runtime_handle().spawn(async move {
             pin_mut!(entries_stream);
 
             while let Some(diffs) = entries_stream.next().await {
@@ -557,8 +557,8 @@ impl RoomListItem {
         self.inner.avatar_url().map(|uri| uri.to_string())
     }
 
-    fn is_direct(&self) -> bool {
-        RUNTIME.block_on(self.inner.inner_room().is_direct()).unwrap_or(false)
+    async fn is_direct(&self) -> bool {
+        self.inner.inner_room().is_direct().await.unwrap_or(false)
     }
 
     fn canonical_alias(&self) -> Option<String> {
@@ -574,45 +574,14 @@ impl RoomListItem {
         self.inner.inner_room().state().into()
     }
 
-    /// Builds a `Room` FFI from an invited room without initializing its
-    /// internal timeline.
-    ///
-    /// An error will be returned if the room is a state different than invited.
-    ///
-    /// ⚠️ Holding on to this room instance after it has been joined is not
-    /// safe. Use `full_room` instead.
-    #[deprecated(note = "Please use `preview_room` instead.")]
-    fn invited_room(&self) -> Result<Arc<Room>, RoomListError> {
-        if !matches!(self.membership(), Membership::Invited) {
-            return Err(RoomListError::IncorrectRoomMembership {
-                expected: vec![Membership::Invited],
-                actual: self.membership(),
-            });
-        }
-        Ok(Arc::new(Room::new(self.inner.inner_room().clone())))
-    }
-
     /// Builds a `RoomPreview` from a room list item. This is intended for
-    /// invited or knocked rooms.
-    ///
-    /// An error will be returned if the room is in a state other than invited
-    /// or knocked.
+    /// invited, knocked or banned rooms.
     async fn preview_room(&self, via: Vec<String>) -> Result<Arc<RoomPreview>, ClientError> {
         // Validate parameters first.
         let server_names: Vec<OwnedServerName> = via
             .into_iter()
             .map(|server| ServerName::parse(server).map_err(ClientError::from))
             .collect::<Result<_, ClientError>>()?;
-
-        // Validate internal room state.
-        let membership = self.membership();
-        if !matches!(membership, Membership::Invited | Membership::Knocked) {
-            return Err(RoomListError::IncorrectRoomMembership {
-                expected: vec![Membership::Invited, Membership::Knocked],
-                actual: membership,
-            }
-            .into());
-        }
 
         // Do the thing.
         let client = self.inner.client();
@@ -711,7 +680,11 @@ impl RoomListItem {
     /// **Note**: this info may not be reliable if you don't set up
     /// `m.room.encryption` as required state.
     async fn is_encrypted(&self) -> bool {
-        self.inner.is_encrypted().await.unwrap_or(false)
+        self.inner
+            .latest_encryption_state()
+            .await
+            .map(|state| state.is_encrypted())
+            .unwrap_or(false)
     }
 
     async fn latest_event(&self) -> Option<EventTimelineItem> {

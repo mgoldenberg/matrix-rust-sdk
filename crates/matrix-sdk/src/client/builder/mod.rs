@@ -15,10 +15,14 @@
 
 mod homeserver_config;
 
+#[cfg(feature = "sqlite")]
+use std::path::Path;
 use std::{fmt, sync::Arc};
 
 use homeserver_config::*;
 use matrix_sdk_base::{store::StoreConfig, BaseClient};
+#[cfg(feature = "sqlite")]
+use matrix_sdk_sqlite::SqliteStoreConfig;
 use ruma::{
     api::{error::FromHttpResponseError, MatrixVersion},
     OwnedServerName, ServerName,
@@ -28,8 +32,6 @@ use tokio::sync::{broadcast, Mutex, OnceCell};
 use tracing::{debug, field::debug, instrument, Span};
 
 use super::{Client, ClientInner};
-#[cfg(feature = "experimental-oidc")]
-use crate::authentication::oidc::OidcCtx;
 #[cfg(feature = "e2e-encryption")]
 use crate::crypto::{CollectStrategy, TrustRequirement};
 #[cfg(feature = "e2e-encryption")]
@@ -37,9 +39,14 @@ use crate::encryption::EncryptionSettings;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::http_client::HttpSettings;
 use crate::{
-    authentication::AuthCtx, client::ClientServerCapabilities, config::RequestConfig,
-    error::RumaApiError, http_client::HttpClient, send_queue::SendQueueData,
-    sliding_sync::VersionBuilder as SlidingSyncVersionBuilder, HttpError, IdParseError,
+    authentication::{oauth::OAuthCtx, AuthCtx},
+    client::ClientServerCapabilities,
+    config::RequestConfig,
+    error::RumaApiError,
+    http_client::HttpClient,
+    send_queue::SendQueueData,
+    sliding_sync::VersionBuilder as SlidingSyncVersionBuilder,
+    HttpError, IdParseError,
 };
 
 /// Builder that allows creating and configuring various parts of a [`Client`].
@@ -158,8 +165,8 @@ impl ClientBuilder {
     }
 
     /// Set the server name to discover the homeserver from, assuming an HTTP
-    /// (not secured) scheme. This also relaxes OIDC discovery checks to allow
-    /// HTTP schemes.
+    /// (not secured) scheme. This also relaxes OAuth 2.0 discovery checks to
+    /// allow HTTP schemes.
     ///
     /// The following methods are mutually exclusive: [`Self::homeserver_url`],
     /// [`Self::server_name`] [`Self::insecure_server_name_no_tls`],
@@ -201,16 +208,11 @@ impl ClientBuilder {
 
     /// Set up the store configuration for a SQLite store.
     #[cfg(feature = "sqlite")]
-    pub fn sqlite_store(
-        mut self,
-        path: impl AsRef<std::path::Path>,
-        passphrase: Option<&str>,
-    ) -> Self {
-        self.store_config = BuilderStoreConfig::Sqlite {
-            path: path.as_ref().to_owned(),
-            cache_path: None,
-            passphrase: passphrase.map(ToOwned::to_owned),
-        };
+    pub fn sqlite_store(mut self, path: impl AsRef<Path>, passphrase: Option<&str>) -> Self {
+        let sqlite_store_config = SqliteStoreConfig::new(path).passphrase(passphrase);
+        self.store_config =
+            BuilderStoreConfig::Sqlite { config: sqlite_store_config, cache_path: None };
+
         self
     }
 
@@ -219,15 +221,32 @@ impl ClientBuilder {
     #[cfg(feature = "sqlite")]
     pub fn sqlite_store_with_cache_path(
         mut self,
-        path: impl AsRef<std::path::Path>,
-        cache_path: impl AsRef<std::path::Path>,
+        path: impl AsRef<Path>,
+        cache_path: impl AsRef<Path>,
         passphrase: Option<&str>,
     ) -> Self {
+        let sqlite_store_config = SqliteStoreConfig::new(path).passphrase(passphrase);
         self.store_config = BuilderStoreConfig::Sqlite {
-            path: path.as_ref().to_owned(),
+            config: sqlite_store_config,
             cache_path: Some(cache_path.as_ref().to_owned()),
-            passphrase: passphrase.map(ToOwned::to_owned),
         };
+
+        self
+    }
+
+    /// Set up the store configuration for a SQLite store with a store config,
+    /// and with an optional cache data separated out from state/crypto data.
+    #[cfg(feature = "sqlite")]
+    pub fn sqlite_store_with_config_and_cache_path(
+        mut self,
+        config: SqliteStoreConfig,
+        cache_path: Option<impl AsRef<Path>>,
+    ) -> Self {
+        self.store_config = BuilderStoreConfig::Sqlite {
+            config,
+            cache_path: cache_path.map(|cache_path| cache_path.as_ref().to_owned()),
+        };
+
         self
     }
 
@@ -472,7 +491,7 @@ impl ClientBuilder {
             base_client
         } else {
             #[allow(unused_mut)]
-            let mut client = BaseClient::with_store_config(
+            let mut client = BaseClient::new(
                 build_store_config(self.store_config, &self.cross_process_store_locks_holder_name)
                     .await?,
             );
@@ -489,7 +508,7 @@ impl ClientBuilder {
         let http_client = HttpClient::new(inner_http_client.clone(), self.request_config);
 
         #[allow(unused_variables)]
-        let HomeserverDiscoveryResult { server, homeserver, well_known, supported_versions } =
+        let HomeserverDiscoveryResult { server, homeserver, supported_versions } =
             homeserver_cfg.discover(&http_client).await?;
 
         let sliding_sync_version = {
@@ -501,27 +520,24 @@ impl ClientBuilder {
                 None => None,
             };
 
-            let version = self
-                .sliding_sync_version_builder
-                .build(well_known.as_ref(), supported_versions.as_ref())?;
+            let version = self.sliding_sync_version_builder.build(supported_versions.as_ref())?;
 
             tracing::info!(?version, "selected sliding sync version");
 
             version
         };
 
-        #[cfg(feature = "experimental-oidc")]
-        let allow_insecure_oidc = homeserver.scheme() == "http";
+        let allow_insecure_oauth = homeserver.scheme() == "http";
 
         let auth_ctx = Arc::new(AuthCtx {
             handle_refresh_tokens: self.handle_refresh_tokens,
             refresh_token_lock: Arc::new(Mutex::new(Ok(()))),
             session_change_sender: broadcast::Sender::new(1),
             auth_data: OnceCell::default(),
+            tokens: OnceCell::default(),
             reload_session_callback: OnceCell::default(),
             save_session_callback: OnceCell::default(),
-            #[cfg(feature = "experimental-oidc")]
-            oidc: OidcCtx::new(allow_insecure_oidc),
+            oauth: OAuthCtx::new(allow_insecure_oauth),
         });
 
         // Enable the send queue by default.
@@ -573,22 +589,24 @@ async fn build_store_config(
     #[allow(clippy::infallible_destructuring_match)]
     let store_config = match builder_config {
         #[cfg(feature = "sqlite")]
-        BuilderStoreConfig::Sqlite { path, cache_path, passphrase } => {
+        BuilderStoreConfig::Sqlite { config, cache_path } => {
             let store_config = StoreConfig::new(cross_process_store_locks_holder_name.to_owned())
                 .state_store(
-                    matrix_sdk_sqlite::SqliteStateStore::open(&path, passphrase.as_deref()).await?,
+                    matrix_sdk_sqlite::SqliteStateStore::open_with_config(config.clone()).await?,
                 )
-                .event_cache_store(
-                    matrix_sdk_sqlite::SqliteEventCacheStore::open(
-                        cache_path.as_ref().unwrap_or(&path),
-                        passphrase.as_deref(),
-                    )
-                    .await?,
-                );
+                .event_cache_store({
+                    let mut config = config.clone();
+
+                    if let Some(cache_path) = cache_path {
+                        config = config.path(cache_path);
+                    }
+
+                    matrix_sdk_sqlite::SqliteEventCacheStore::open_with_config(config).await?
+                });
 
             #[cfg(feature = "e2e-encryption")]
             let store_config = store_config.crypto_store(
-                matrix_sdk_sqlite::SqliteCryptoStore::open(&path, passphrase.as_deref()).await?,
+                matrix_sdk_sqlite::SqliteCryptoStore::open_with_config(config).await?,
             );
 
             store_config
@@ -688,9 +706,8 @@ impl Default for HttpConfig {
 enum BuilderStoreConfig {
     #[cfg(feature = "sqlite")]
     Sqlite {
-        path: std::path::PathBuf,
+        config: SqliteStoreConfig,
         cache_path: Option<std::path::PathBuf>,
-        passphrase: Option<String>,
     },
     #[cfg(feature = "indexeddb")]
     IndexedDb {
@@ -706,13 +723,17 @@ impl fmt::Debug for BuilderStoreConfig {
         #[allow(clippy::infallible_destructuring_match)]
         match self {
             #[cfg(feature = "sqlite")]
-            Self::Sqlite { path, .. } => {
-                f.debug_struct("Sqlite").field("path", path).finish_non_exhaustive()
-            }
+            Self::Sqlite { config, cache_path, .. } => f
+                .debug_struct("Sqlite")
+                .field("config", config)
+                .field("cache_path", cache_path)
+                .finish_non_exhaustive(),
+
             #[cfg(feature = "indexeddb")]
             Self::IndexedDb { name, .. } => {
                 f.debug_struct("IndexedDb").field("name", name).finish_non_exhaustive()
             }
+
             Self::Custom(store_config) => f.debug_tuple("Custom").field(store_config).finish(),
         }
     }
@@ -762,7 +783,6 @@ pub(crate) mod tests {
     use assert_matches::assert_matches;
     use matrix_sdk_test::{async_test, test_json};
     use serde_json::{json_internal, Value as JsonValue};
-    use url::Url;
     use wiremock::{
         matchers::{method, path},
         Mock, MockServer, ResponseTemplate,
@@ -854,41 +874,13 @@ pub(crate) mod tests {
     }
 
     #[async_test]
-    async fn test_discovery_direct_legacy_custom_proxy() {
-        // Given a homeserver without a well-known file and with a custom sliding sync
-        // proxy injected.
-        let homeserver = make_mock_homeserver().await;
-        let mut builder = ClientBuilder::new();
-        let url = {
-            let url = Url::parse("https://localhost:1234").unwrap();
-            builder = builder.sliding_sync_version_builder(SlidingSyncVersionBuilder::Proxy {
-                url: url.clone(),
-            });
-
-            url
-        };
-
-        // When building a client with the server's URL.
-        builder = builder.server_name_or_homeserver_url(homeserver.uri());
-        let client = builder.build().await.unwrap();
-
-        // Then a client should be built with support for sliding sync.
-        assert_matches!(
-            client.sliding_sync_version(),
-            SlidingSyncVersion::Proxy { url: given_url } => {
-                assert_eq!(given_url, url);
-            }
-        );
-    }
-
-    #[async_test]
     async fn test_discovery_well_known_parse_error() {
         // Given a base server with a well-known file that has errors.
         let server = MockServer::start().await;
         let homeserver = make_mock_homeserver().await;
         let mut builder = ClientBuilder::new();
 
-        let well_known = make_well_known_json(&homeserver.uri(), None);
+        let well_known = make_well_known_json(&homeserver.uri());
         let bad_json = well_known.to_string().replace(',', "");
         Mock::given(method("GET"))
             .and(path("/.well-known/matrix/client"))
@@ -918,8 +910,7 @@ pub(crate) mod tests {
         Mock::given(method("GET"))
             .and(path("/.well-known/matrix/client"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(make_well_known_json(&homeserver.uri(), None)),
+                ResponseTemplate::new(200).set_body_json(make_well_known_json(&homeserver.uri())),
             )
             .mount(&server)
             .await;
@@ -931,110 +922,6 @@ pub(crate) mod tests {
         // Then a client should be built with native support for sliding sync.
         // It's native support because it's the default. Nothing is checked here.
         assert!(client.sliding_sync_version().is_native());
-    }
-
-    #[async_test]
-    async fn test_discovery_well_known_with_sliding_sync() {
-        // Given a base server with a well-known file that points to a homeserver with a
-        // sliding sync proxy.
-        let server = MockServer::start().await;
-        let homeserver = make_mock_homeserver().await;
-        let mut builder = ClientBuilder::new();
-
-        Mock::given(method("GET"))
-            .and(path("/.well-known/matrix/client"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(make_well_known_json(
-                &homeserver.uri(),
-                Some("https://localhost:1234"),
-            )))
-            .mount(&server)
-            .await;
-
-        // When building a client with the base server, with sliding sync to
-        // auto-discover the proxy.
-        builder = builder
-            .server_name_or_homeserver_url(server.uri())
-            .sliding_sync_version_builder(SlidingSyncVersionBuilder::DiscoverProxy);
-        let client = builder.build().await.unwrap();
-
-        // Then a client should be built with support for sliding sync.
-        assert_matches!(
-            client.sliding_sync_version(),
-            SlidingSyncVersion::Proxy { url } => {
-                assert_eq!(url, Url::parse("https://localhost:1234").unwrap());
-            }
-        );
-    }
-
-    #[async_test]
-    async fn test_discovery_well_known_with_sliding_sync_override() {
-        // Given a base server with a well-known file that points to a homeserver with a
-        // sliding sync proxy.
-        let server = MockServer::start().await;
-        let homeserver = make_mock_homeserver().await;
-        let mut builder = ClientBuilder::new();
-
-        Mock::given(method("GET"))
-            .and(path("/.well-known/matrix/client"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(make_well_known_json(
-                &homeserver.uri(),
-                Some("https://localhost:1234"),
-            )))
-            .mount(&server)
-            .await;
-
-        // When building a client with the base server and a custom sliding sync proxy
-        // set.
-        let url = Url::parse("https://localhost:9012").unwrap();
-
-        builder = builder
-            .sliding_sync_version_builder(SlidingSyncVersionBuilder::Proxy { url: url.clone() })
-            .server_name_or_homeserver_url(server.uri());
-
-        let client = builder.build().await.unwrap();
-
-        // Then a client should be built and configured with the custom sliding sync
-        // proxy.
-        assert_matches!(
-            client.sliding_sync_version(),
-            SlidingSyncVersion::Proxy { url: given_url } => {
-                assert_eq!(url, given_url);
-            }
-        );
-    }
-
-    #[async_test]
-    async fn test_sliding_sync_discover_proxy() {
-        // Given a homeserver with a `.well-known` file.
-        let homeserver = make_mock_homeserver().await;
-        let mut builder = ClientBuilder::new();
-
-        let expected_url = Url::parse("https://localhost:1234").unwrap();
-
-        Mock::given(method("GET"))
-            .and(path("/.well-known/matrix/client"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(make_well_known_json(
-                &homeserver.uri(),
-                Some(expected_url.as_str()),
-            )))
-            .mount(&homeserver)
-            .await;
-
-        // When building the client with sliding sync to auto-discover the
-        // proxy version.
-        builder = builder
-            .server_name_or_homeserver_url(homeserver.uri())
-            .sliding_sync_version_builder(SlidingSyncVersionBuilder::DiscoverProxy);
-
-        let client = builder.build().await.unwrap();
-
-        // Then, sliding sync has the correct proxy URL.
-        assert_matches!(
-            client.sliding_sync_version(),
-            SlidingSyncVersion::Proxy { url } => {
-                assert_eq!(url, expected_url);
-            }
-        );
     }
 
     #[async_test]
@@ -1103,10 +990,7 @@ pub(crate) mod tests {
         homeserver
     }
 
-    fn make_well_known_json(
-        homeserver_url: &str,
-        sliding_sync_proxy_url: Option<&str>,
-    ) -> JsonValue {
+    fn make_well_known_json(homeserver_url: &str) -> JsonValue {
         ::serde_json::Value::Object({
             let mut object = ::serde_json::Map::new();
             let _ = object.insert(
@@ -1115,15 +999,6 @@ pub(crate) mod tests {
                     "base_url": homeserver_url
                 }),
             );
-
-            if let Some(sliding_sync_proxy_url) = sliding_sync_proxy_url {
-                let _ = object.insert(
-                    "org.matrix.msc3575.proxy".into(),
-                    json_internal!({
-                        "url": sliding_sync_proxy_url
-                    }),
-                );
-            }
 
             object
         })

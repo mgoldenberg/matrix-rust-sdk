@@ -15,7 +15,6 @@
 use std::sync::Arc;
 
 use as_variant::as_variant;
-use imbl::Vector;
 use matrix_sdk::crypto::types::events::UtdCause;
 use matrix_sdk_base::latest_event::{is_suitable_for_latest_event, PossibleLatestEvent};
 use ruma::{
@@ -57,43 +56,34 @@ use ruma::{
         AnyFullStateEventContent, AnySyncTimelineEvent, FullStateEventContent,
         MessageLikeEventType, StateEventType,
     },
-    OwnedDeviceId, OwnedMxcUri, OwnedUserId, RoomVersionId, UserId,
+    html::RemoveReplyFallback,
+    OwnedDeviceId, OwnedEventId, OwnedMxcUri, OwnedUserId, RoomVersionId, UserId,
 };
 use tracing::warn;
 
-use crate::timeline::TimelineItem;
-
 mod message;
+mod msg_like;
 pub(crate) mod pinned_events;
 mod polls;
+mod reply;
 
 pub use pinned_events::RoomPinnedEventsChange;
 
-pub(in crate::timeline) use self::{
-    message::{
-        extract_bundled_edit_event_json, extract_poll_edit_content, extract_room_msg_edit_content,
-    },
-    polls::ResponseData,
+pub(in crate::timeline) use self::message::{
+    extract_bundled_edit_event_json, extract_poll_edit_content, extract_room_msg_edit_content,
 };
 pub use self::{
-    message::{InReplyToDetails, Message, RepliedToEvent},
+    message::Message,
+    msg_like::{MsgLikeContent, MsgLikeKind, ThreadSummary, ThreadSummaryLatestEvent},
     polls::{PollResult, PollState},
+    reply::{InReplyToDetails, RepliedToEvent},
 };
+use super::ReactionsByKeyBySender;
 
 /// The content of an [`EventTimelineItem`][super::EventTimelineItem].
 #[derive(Clone, Debug)]
 pub enum TimelineItemContent {
-    /// An `m.room.message` event or extensible event, including edits.
-    Message(Message),
-
-    /// A redacted message.
-    RedactedMessage,
-
-    /// An `m.sticker` event.
-    Sticker(Sticker),
-
-    /// An `m.room.encrypted` event that could not be decrypted.
-    UnableToDecrypt(EncryptedMessage),
+    MsgLike(MsgLikeContent),
 
     /// A room membership change.
     MembershipChange(RoomMembershipChange),
@@ -124,9 +114,6 @@ pub enum TimelineItemContent {
         /// The deserialization error.
         error: Arc<serde_json::Error>,
     },
-
-    /// An `m.poll.start` event.
-    Poll(PollState),
 
     /// An `m.call.invite` event
     CallInvite,
@@ -207,20 +194,30 @@ impl TimelineItemContent {
                         }
                     });
 
-                // If this message is a reply, we would look up in this list the message it was
-                // replying to. Since we probably won't show this in the message preview,
-                // it's probably OK to supply an empty list here.
-                // `Message::from_event` marks the original event as `Unavailable` if it can't
-                // be found inside the timeline_items.
-                let timeline_items = Vector::new();
-                TimelineItemContent::Message(Message::from_event(
-                    event_content,
-                    edit,
-                    &timeline_items,
-                ))
+                // We're not interested in aggregations for the latest preview item.
+                let reactions = Default::default();
+                let thread_root = None;
+                let in_reply_to = None;
+                let thread_summary = None;
+
+                let msglike = MsgLikeContent {
+                    kind: MsgLikeKind::Message(Message::from_event(
+                        event_content,
+                        edit,
+                        RemoveReplyFallback::Yes,
+                    )),
+                    reactions,
+                    thread_root,
+                    in_reply_to,
+                    thread_summary,
+                };
+
+                TimelineItemContent::MsgLike(msglike)
             }
 
-            SyncRoomMessageEvent::Redacted(_) => TimelineItemContent::RedactedMessage,
+            SyncRoomMessageEvent::Redacted(_) => {
+                TimelineItemContent::MsgLike(MsgLikeContent::redacted())
+            }
         }
     }
 
@@ -237,7 +234,9 @@ impl TimelineItemContent {
                     event.sender.to_owned(),
                 )
             }
-            SyncRoomMemberEvent::Redacted(_) => TimelineItemContent::RedactedMessage,
+            SyncRoomMemberEvent::Redacted(_) => {
+                TimelineItemContent::MsgLike(MsgLikeContent::redacted())
+            }
         }
     }
 
@@ -249,9 +248,26 @@ impl TimelineItemContent {
             SyncStickerEvent::Original(event) => {
                 // Grab the content of this event
                 let event_content = event.content.clone();
-                TimelineItemContent::Sticker(Sticker { content: event_content })
+
+                // We're not interested in aggregations for the latest preview item.
+                let reactions = Default::default();
+                let thread_root = None;
+                let in_reply_to = None;
+                let thread_summary = None;
+
+                let msglike = MsgLikeContent {
+                    kind: MsgLikeKind::Sticker(Sticker { content: event_content }),
+                    reactions,
+                    thread_root,
+                    in_reply_to,
+                    thread_summary,
+                };
+
+                TimelineItemContent::MsgLike(msglike)
             }
-            SyncStickerEvent::Redacted(_) => TimelineItemContent::RedactedMessage,
+            SyncStickerEvent::Redacted(_) => {
+                TimelineItemContent::MsgLike(MsgLikeContent::redacted())
+            }
         }
     }
 
@@ -261,7 +277,7 @@ impl TimelineItemContent {
         event: &SyncUnstablePollStartEvent,
     ) -> TimelineItemContent {
         let SyncUnstablePollStartEvent::Original(event) = event else {
-            return TimelineItemContent::RedactedMessage;
+            return TimelineItemContent::MsgLike(MsgLikeContent::redacted());
         };
 
         // Feed the bundled edit, if present, or we might miss showing edited content.
@@ -276,10 +292,24 @@ impl TimelineItemContent {
                 }
             });
 
-        TimelineItemContent::Poll(PollState::new(
-            NewUnstablePollStartEventContent::new(event.content.poll_start().clone()),
-            edit,
-        ))
+        // We're not interested in aggregations for the latest preview item.
+        let reactions = Default::default();
+        let thread_root = None;
+        let in_reply_to = None;
+        let thread_summary = None;
+
+        let msglike = MsgLikeContent {
+            kind: MsgLikeKind::Poll(PollState::new(
+                NewUnstablePollStartEventContent::new(event.content.poll_start().clone()),
+                edit,
+            )),
+            reactions,
+            thread_root,
+            in_reply_to,
+            thread_summary,
+        };
+
+        TimelineItemContent::MsgLike(msglike)
     }
 
     fn from_suitable_latest_call_invite_content(
@@ -287,7 +317,9 @@ impl TimelineItemContent {
     ) -> TimelineItemContent {
         match event {
             SyncCallInviteEvent::Original(_) => TimelineItemContent::CallInvite,
-            SyncCallInviteEvent::Redacted(_) => TimelineItemContent::RedactedMessage,
+            SyncCallInviteEvent::Redacted(_) => {
+                TimelineItemContent::MsgLike(MsgLikeContent::redacted())
+            }
         }
     }
 
@@ -296,26 +328,82 @@ impl TimelineItemContent {
     ) -> TimelineItemContent {
         match event {
             SyncCallNotifyEvent::Original(_) => TimelineItemContent::CallNotify,
-            SyncCallNotifyEvent::Redacted(_) => TimelineItemContent::RedactedMessage,
+            SyncCallNotifyEvent::Redacted(_) => {
+                TimelineItemContent::MsgLike(MsgLikeContent::redacted())
+            }
         }
     }
 
-    /// If `self` is of the [`Message`][Self::Message] variant, return the inner
-    /// [`Message`].
+    pub fn as_msglike(&self) -> Option<&MsgLikeContent> {
+        as_variant!(self, TimelineItemContent::MsgLike)
+    }
+
+    /// If `self` is of the [`MsgLike`][Self::MsgLike] variant, return the
+    /// inner [`Message`].
     pub fn as_message(&self) -> Option<&Message> {
-        as_variant!(self, Self::Message)
+        as_variant!(self, Self::MsgLike(MsgLikeContent {
+            kind: MsgLikeKind::Message(message),
+            ..
+        }) => message)
     }
 
-    /// If `self` is of the [`Poll`][Self::Poll] variant, return the inner
-    /// [`PollState`].
+    /// Check whether this item's content is a
+    /// [`Message`][MsgLikeKind::Message].
+    pub fn is_message(&self) -> bool {
+        matches!(self, Self::MsgLike(MsgLikeContent { kind: MsgLikeKind::Message(_), .. }))
+    }
+
+    /// If `self` is of the [`MsgLike`][Self::MsgLike] variant, return the
+    /// inner [`PollState`].
     pub fn as_poll(&self) -> Option<&PollState> {
-        as_variant!(self, Self::Poll)
+        as_variant!(self, Self::MsgLike(MsgLikeContent {
+            kind: MsgLikeKind::Poll(poll_state),
+            ..
+        }) => poll_state)
     }
 
-    /// If `self` is of the [`UnableToDecrypt`][Self::UnableToDecrypt] variant,
-    /// return the inner [`EncryptedMessage`].
+    /// Check whether this item's content is a
+    /// [`Poll`][MsgLikeKind::Poll].
+    pub fn is_poll(&self) -> bool {
+        matches!(self, Self::MsgLike(MsgLikeContent { kind: MsgLikeKind::Poll(_), .. }))
+    }
+
+    pub fn as_sticker(&self) -> Option<&Sticker> {
+        as_variant!(
+            self,
+            Self::MsgLike(MsgLikeContent {
+                kind: MsgLikeKind::Sticker(sticker),
+                ..
+            }) => sticker
+        )
+    }
+
+    /// Check whether this item's content is a
+    /// [`Sticker`][MsgLikeKind::Sticker].
+    pub fn is_sticker(&self) -> bool {
+        matches!(self, Self::MsgLike(MsgLikeContent { kind: MsgLikeKind::Sticker(_), .. }))
+    }
+
+    /// If `self` is of the [`UnableToDecrypt`][MsgLikeKind::UnableToDecrypt]
+    /// variant, return the inner [`EncryptedMessage`].
     pub fn as_unable_to_decrypt(&self) -> Option<&EncryptedMessage> {
-        as_variant!(self, Self::UnableToDecrypt)
+        as_variant!(
+            self,
+            Self::MsgLike(MsgLikeContent {
+                kind: MsgLikeKind::UnableToDecrypt(encrypted_message),
+                ..
+            }) => encrypted_message
+        )
+    }
+
+    /// Check whether this item's content is a
+    /// [`UnableToDecrypt`][MsgLikeKind::UnableToDecrypt].
+    pub fn is_unable_to_decrypt(&self) -> bool {
+        matches!(self, Self::MsgLike(MsgLikeContent { kind: MsgLikeKind::UnableToDecrypt(_), .. }))
+    }
+
+    pub fn is_redacted(&self) -> bool {
+        matches!(self, Self::MsgLike(MsgLikeContent { kind: MsgLikeKind::Redacted, .. }))
     }
 
     // These constructors could also be `From` implementations, but that would
@@ -323,31 +411,35 @@ impl TimelineItemContent {
     pub(crate) fn message(
         c: RoomMessageEventContent,
         edit: Option<RoomMessageEventContentWithoutRelation>,
-        timeline_items: &Vector<Arc<TimelineItem>>,
+        reactions: ReactionsByKeyBySender,
+        thread_root: Option<OwnedEventId>,
+        in_reply_to: Option<InReplyToDetails>,
+        thread_summary: Option<ThreadSummary>,
     ) -> Self {
-        Self::Message(Message::from_event(c, edit, timeline_items))
+        let remove_reply_fallback =
+            if in_reply_to.is_some() { RemoveReplyFallback::Yes } else { RemoveReplyFallback::No };
+
+        Self::MsgLike(MsgLikeContent {
+            kind: MsgLikeKind::Message(Message::from_event(c, edit, remove_reply_fallback)),
+            reactions,
+            thread_root,
+            in_reply_to,
+            thread_summary,
+        })
     }
 
     #[cfg(not(tarpaulin_include))] // debug-logging functionality
     pub(crate) fn debug_string(&self) -> &'static str {
         match self {
-            TimelineItemContent::Message(_) => "a message",
-            TimelineItemContent::RedactedMessage => "a redacted messages",
-            TimelineItemContent::Sticker(_) => "a sticker",
-            TimelineItemContent::UnableToDecrypt(_) => "an encrypted message we couldn't decrypt",
+            TimelineItemContent::MsgLike(msglike) => msglike.debug_string(),
             TimelineItemContent::MembershipChange(_) => "a membership change",
             TimelineItemContent::ProfileChange(_) => "a profile change",
             TimelineItemContent::OtherState(_) => "a state event",
             TimelineItemContent::FailedToParseMessageLike { .. }
             | TimelineItemContent::FailedToParseState { .. } => "an event that couldn't be parsed",
-            TimelineItemContent::Poll(_) => "a poll",
             TimelineItemContent::CallInvite => "a call invite",
             TimelineItemContent::CallNotify => "a call notification",
         }
-    }
-
-    pub(crate) fn unable_to_decrypt(content: RoomEncryptedEventContent, cause: UtdCause) -> Self {
-        Self::UnableToDecrypt(EncryptedMessage::from_content(content, cause))
     }
 
     pub(crate) fn room_member(
@@ -417,18 +509,76 @@ impl TimelineItemContent {
 
     pub(in crate::timeline) fn redact(&self, room_version: &RoomVersionId) -> Self {
         match self {
-            Self::Message(_)
-            | Self::RedactedMessage
-            | Self::Sticker(_)
-            | Self::Poll(_)
-            | Self::CallInvite
-            | Self::CallNotify
-            | Self::UnableToDecrypt(_) => Self::RedactedMessage,
+            Self::MsgLike(_) | Self::CallInvite | Self::CallNotify => {
+                TimelineItemContent::MsgLike(MsgLikeContent::redacted())
+            }
             Self::MembershipChange(ev) => Self::MembershipChange(ev.redact(room_version)),
             Self::ProfileChange(ev) => Self::ProfileChange(ev.redact()),
             Self::OtherState(ev) => Self::OtherState(ev.redact(room_version)),
             Self::FailedToParseMessageLike { .. } | Self::FailedToParseState { .. } => self.clone(),
         }
+    }
+
+    /// Event ID of the thread root, if this is a message in a thread.
+    pub fn thread_root(&self) -> Option<OwnedEventId> {
+        as_variant!(self, Self::MsgLike)?.thread_root.clone()
+    }
+
+    /// Get the event this message is replying to, if any.
+    pub fn in_reply_to(&self) -> Option<InReplyToDetails> {
+        as_variant!(self, Self::MsgLike)?.in_reply_to.clone()
+    }
+
+    /// Return the reactions, grouped by key and then by sender, for a given
+    /// content.
+    pub fn reactions(&self) -> ReactionsByKeyBySender {
+        match self {
+            TimelineItemContent::MsgLike(msglike) => msglike.reactions.clone(),
+
+            TimelineItemContent::MembershipChange(..)
+            | TimelineItemContent::ProfileChange(..)
+            | TimelineItemContent::OtherState(..)
+            | TimelineItemContent::FailedToParseMessageLike { .. }
+            | TimelineItemContent::FailedToParseState { .. }
+            | TimelineItemContent::CallInvite
+            | TimelineItemContent::CallNotify => {
+                // No reactions for these kind of items.
+                Default::default()
+            }
+        }
+    }
+
+    /// Information about the thread this item is the root for.
+    pub fn thread_summary(&self) -> Option<ThreadSummary> {
+        as_variant!(self, Self::MsgLike)?.thread_summary.clone()
+    }
+
+    /// Return a mutable handle to the reactions of this item.
+    ///
+    /// See also [`Self::reactions()`] to explain the optional return type.
+    pub(crate) fn reactions_mut(&mut self) -> Option<&mut ReactionsByKeyBySender> {
+        match self {
+            TimelineItemContent::MsgLike(msglike) => Some(&mut msglike.reactions),
+
+            TimelineItemContent::MembershipChange(..)
+            | TimelineItemContent::ProfileChange(..)
+            | TimelineItemContent::OtherState(..)
+            | TimelineItemContent::FailedToParseMessageLike { .. }
+            | TimelineItemContent::FailedToParseState { .. }
+            | TimelineItemContent::CallInvite
+            | TimelineItemContent::CallNotify => {
+                // No reactions for these kind of items.
+                None
+            }
+        }
+    }
+
+    pub fn with_reactions(&self, reactions: ReactionsByKeyBySender) -> Self {
+        let mut cloned = self.clone();
+        if let Some(r) = cloned.reactions_mut() {
+            *r = reactions;
+        }
+        cloned
     }
 }
 
@@ -465,7 +615,7 @@ pub enum EncryptedMessage {
 }
 
 impl EncryptedMessage {
-    fn from_content(content: RoomEncryptedEventContent, cause: UtdCause) -> Self {
+    pub(crate) fn from_content(content: RoomEncryptedEventContent, cause: UtdCause) -> Self {
         match content.scheme {
             EncryptedEventScheme::OlmV1Curve25519AesSha2(s) => {
                 Self::OlmV1Curve25519AesSha2 { sender_key: s.sender_key }
@@ -477,6 +627,16 @@ impl EncryptedMessage {
                 Self::MegolmV1AesSha2 { sender_key, device_id, session_id, cause }
             }
             _ => Self::Unknown,
+        }
+    }
+
+    /// Return the ID of the Megolm session used to encrypt this message, if it
+    /// was received via a Megolm session.
+    pub(crate) fn session_id(&self) -> Option<&str> {
+        match self {
+            EncryptedMessage::OlmV1Curve25519AesSha2 { .. } => None,
+            EncryptedMessage::MegolmV1AesSha2 { session_id, .. } => Some(session_id),
+            EncryptedMessage::Unknown => None,
         }
     }
 }

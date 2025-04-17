@@ -21,7 +21,7 @@ use std::{
     },
 };
 
-use matrix_sdk_common::{deserialized_responses::WithheldCode, locks::RwLock};
+use matrix_sdk_common::locks::RwLock;
 use ruma::{
     api::client::keys::upload_signatures::v3::Request as SignatureUploadRequest,
     events::{key::verification::VerificationMethod, AnyToDeviceEventContent},
@@ -31,14 +31,14 @@ use ruma::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tracing::{instrument, trace, warn};
+use tracing::{instrument, trace};
 use vodozemac::{olm::SessionConfig, Curve25519PublicKey, Ed25519PublicKey};
 
 use super::{atomic_bool_deserializer, atomic_bool_serializer};
 #[cfg(any(test, feature = "testing", doc))]
 use crate::OlmMachine;
 use crate::{
-    error::{EventError, MismatchedIdentityKeysError, OlmError, OlmResult, SignatureError},
+    error::{MismatchedIdentityKeysError, OlmError, OlmResult, SignatureError},
     identities::{OwnUserIdentityData, UserIdentityData},
     olm::{
         InboundGroupSession, OutboundGroupSession, Session, ShareInfo, SignedJsonObject, VerifyJson,
@@ -64,9 +64,9 @@ pub enum MaybeEncryptedRoomKey {
         share_info: ShareInfo,
         message: Raw<AnyToDeviceEventContent>,
     },
-    Withheld {
-        code: WithheldCode,
-    },
+    /// We could not encrypt a message to this device because there is no active
+    /// Olm session.
+    MissingSession,
 }
 
 /// A read-only version of a `Device`.
@@ -425,18 +425,19 @@ impl Device {
         session: InboundGroupSession,
         message_index: Option<u32>,
     ) -> OlmResult<(Session, Raw<ToDeviceEncryptedEventContent>)> {
-        let (event_type, content) = {
+        let content: ForwardedRoomKeyContent = {
             let export = if let Some(index) = message_index {
                 session.export_at_index(index).await
             } else {
                 session.export().await
             };
-            let content: ForwardedRoomKeyContent = export.try_into()?;
 
-            (content.event_type(), content)
+            export.try_into()?
         };
 
-        self.encrypt(event_type, content).await
+        let event_type = content.event_type().to_owned();
+
+        self.encrypt(&event_type, content).await
     }
 
     /// Encrypt an event for this device.
@@ -694,12 +695,7 @@ impl DeviceData {
                 Ok(None)
             }
         } else {
-            warn!(
-                "Trying to find an Olm session of a device, but the device doesn't have a \
-                Curve25519 key",
-            );
-
-            Err(EventError::MissingSenderKey.into())
+            Ok(None)
         }
     }
 
@@ -832,9 +828,9 @@ impl DeviceData {
     ) -> OlmResult<MaybeEncryptedRoomKey> {
         let content = session.as_content().await;
         let message_index = session.message_index().await;
-        let event_type = content.event_type();
+        let event_type = content.event_type().to_owned();
 
-        match self.encrypt(store, event_type, content).await {
+        match self.encrypt(store, &event_type, content).await {
             Ok((session, encrypted)) => Ok(MaybeEncryptedRoomKey::Encrypted {
                 share_info: ShareInfo::new_shared(
                     session.sender_key().to_owned(),
@@ -845,9 +841,7 @@ impl DeviceData {
                 message: encrypted.cast(),
             }),
 
-            Err(OlmError::MissingSession | OlmError::EventError(EventError::MissingSenderKey)) => {
-                Ok(MaybeEncryptedRoomKey::Withheld { code: WithheldCode::NoOlm })
-            }
+            Err(OlmError::MissingSession) => Ok(MaybeEncryptedRoomKey::MissingSession),
             Err(e) => Err(e),
         }
     }
@@ -869,6 +863,13 @@ impl DeviceData {
                 device_keys.ed25519_key().map(Box::new),
             ))
         } else if self.device_keys.as_ref() != device_keys {
+            trace!(
+                user_id = ?self.user_id(),
+                device_id = ?self.device_id(),
+                keys = ?self.keys(),
+                "Updated a device",
+            );
+
             self.device_keys = device_keys.clone().into();
 
             Ok(true)

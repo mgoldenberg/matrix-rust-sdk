@@ -1,36 +1,165 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    future::IntoFuture,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use anyhow::Result;
 use assert_matches::assert_matches;
 use assert_matches2::assert_let;
 use assign::assign;
 use matrix_sdk::{
-    crypto::{format_emojis, SasState},
+    assert_next_eq_with_timeout,
+    crypto::{format_emojis, SasState, UserDevices},
     encryption::{
         backups::BackupState,
-        recovery::RecoveryState,
+        recovery::{Recovery, RecoveryState},
         verification::{
             QrVerificationData, QrVerificationState, Verification, VerificationRequestState,
         },
         BackupDownloadStrategy, EncryptionSettings, LocalTrust,
     },
     ruma::{
-        api::client::room::create_room::v3::Request as CreateRoomRequest,
+        api::client::{
+            message::send_message_event,
+            room::create_room::v3::{Request as CreateRoomRequest, RoomPreset},
+        },
         events::{
             key::verification::{request::ToDeviceKeyVerificationRequestEvent, VerificationMethod},
             room::message::{
                 MessageType, OriginalSyncRoomMessageEvent, RoomMessageEventContent,
                 SyncRoomMessageEvent,
             },
-            OriginalSyncMessageLikeEvent,
+            secret_storage::secret::SecretEventContent,
+            GlobalAccountDataEventType, MessageLikeEventType, OriginalSyncMessageLikeEvent,
         },
+        serde::Raw,
+        OwnedEventId, TransactionId, UserId,
     },
+    timeout::timeout,
     Client,
 };
+use matrix_sdk_ui::{
+    notification_client::{NotificationClient, NotificationProcessSetup},
+    sync_service::SyncService,
+};
 use similar_asserts::assert_eq;
-use tracing::warn;
+use tracing::{debug, info, warn, Instrument};
 
 use crate::helpers::{SyncTokenAwareClient, TestClientBuilder};
+
+// This test reproduces a bug seen on clients that use the same `Client`
+// instance for both the usual sliding sync loop and for getting the event for a
+// notification (i.e. Element X Android). The verification events will be
+// processed twice, meaning incorrect verification states will be found and the
+// process will fail, especially with user verification.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_mutual_sas_verification_with_notification_client_ignores_verification_events(
+) -> Result<()> {
+    let encryption_settings =
+        EncryptionSettings { auto_enable_cross_signing: true, ..Default::default() };
+    let alice = TestClientBuilder::new("alice")
+        .use_sqlite()
+        .encryption_settings(encryption_settings)
+        .build()
+        .await?;
+
+    let alice_sync_service =
+        Arc::new(SyncService::builder(alice.clone()).build().await.expect("Wat"));
+
+    let bob = TestClientBuilder::new("bob")
+        .use_sqlite()
+        .encryption_settings(encryption_settings)
+        .build()
+        .await?;
+
+    let bob_sync_service = Arc::new(SyncService::builder(bob.clone()).build().await.expect("Wat"));
+    let bob_id = bob.user_id().expect("Bob should be logged in by now");
+
+    alice.encryption().wait_for_e2ee_initialization_tasks().await;
+    bob.encryption().wait_for_e2ee_initialization_tasks().await;
+
+    alice_sync_service.start().await;
+    bob_sync_service.start().await;
+
+    warn!("alice's device: {}", alice.device_id().unwrap());
+    warn!("bob's device: {}", bob.device_id().unwrap());
+
+    // Set up the test: Alice creates the DM room, and invites Bob, who joins
+    let invite = vec![bob_id.to_owned()];
+    let request = assign!(CreateRoomRequest::new(), {
+        invite,
+        is_direct: true,
+    });
+
+    let alice_room = alice.create_room(request).await?;
+    alice_room.enable_encryption().await?;
+    let room_id = alice_room.room_id();
+
+    warn!("alice has created and enabled encryption in the room");
+
+    timeout(
+        async {
+            loop {
+                if let Some(room) = bob.get_room(room_id) {
+                    room.join().await.expect("We should be able to join a room");
+                    return;
+                }
+            }
+        },
+        Duration::from_secs(1),
+    )
+    .await
+    .expect("Bob should have joined the room");
+
+    bob_sync_service.stop().await;
+
+    warn!("alice and bob are both aware of each other in the e2ee room");
+
+    alice_room
+        .send(RoomMessageEventContent::text_plain("Hello Bob"))
+        .await
+        .expect("We should be able to send a message to the room");
+
+    let alice_bob_identity = alice
+        .encryption()
+        .get_user_identity(bob_id)
+        .await
+        .expect("We should be able to fetch an identity from the store")
+        .expect("Bob's identity should be known by now");
+
+    warn!("alice has found bob's identity");
+
+    let alice_verification_request = alice_bob_identity.request_verification().await?;
+
+    // The notification client must use the `SingleProcess` setup
+    let notification_client = NotificationClient::new(
+        bob.clone(),
+        NotificationProcessSetup::SingleProcess { sync_service: bob_sync_service.clone() },
+    )
+    .await
+    .expect("couldn't create notification client");
+
+    let event_id = OwnedEventId::try_from(alice_verification_request.flow_id())
+        .expect("We should be able to get the event id from the verification flow id");
+
+    // Simulate getting the event for a notification
+    let _ = notification_client.get_notification_with_sliding_sync(room_id, &event_id).await;
+
+    let verification = bob
+        .encryption()
+        .get_verification_request(
+            alice_verification_request.own_user_id(),
+            alice_verification_request.flow_id(),
+        )
+        .await;
+
+    // If the ignore_verification_events parameter is true in NotificationClient,
+    // no verification request should have been received
+    assert!(verification.is_none());
+
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_mutual_sas_verification() -> Result<()> {
@@ -971,6 +1100,209 @@ async fn test_secret_gossip_after_interactive_verification() -> Result<()> {
         message.body, "It's a secret to everybody",
         "The decrypted message should match the text we encrypted."
     );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_recovery_disabling_deletes_secret_storage_secrets() -> Result<()> {
+    let encryption_settings = EncryptionSettings {
+        auto_enable_cross_signing: true,
+        auto_enable_backups: true,
+        ..Default::default()
+    };
+    let client = SyncTokenAwareClient::new(
+        TestClientBuilder::new("alice_recovery_deletion_test")
+            .encryption_settings(encryption_settings)
+            .build()
+            .await?,
+    );
+
+    debug!("Enabling recovery");
+
+    client.encryption().wait_for_e2ee_initialization_tasks().await;
+    client.encryption().recovery().enable().await?;
+
+    // Let's wait for recovery to become enabled.
+    let mut recovery_state = client.encryption().recovery().state_stream();
+
+    debug!("Checking that recovery has been enabled");
+
+    assert_next_eq_with_timeout!(
+        recovery_state,
+        RecoveryState::Enabled,
+        "Recovery should have been enabled"
+    );
+
+    debug!("Checking that the secrets have been stored on the server");
+
+    for event_type in Recovery::KNOWN_SECRETS {
+        let event_type = GlobalAccountDataEventType::from(event_type.clone());
+        let event = client
+            .account()
+            .fetch_account_data(event_type.clone())
+            .await?
+            .expect("The secret event should still exist");
+
+        let event = event
+            .deserialize_as::<SecretEventContent>()
+            .expect("We should be able to deserialize the content of known secrets");
+
+        assert!(
+            !event.encrypted.is_empty(),
+            "The known secret {event_type} should exist on the server"
+        );
+    }
+
+    debug!("Disabling recovery");
+
+    client.encryption().recovery().disable().await?;
+
+    debug!("Checking that the secrets have been removed from the server");
+
+    for event_type in Recovery::KNOWN_SECRETS {
+        let event_type = GlobalAccountDataEventType::from(event_type.clone());
+        let event = client
+            .account()
+            .fetch_account_data(event_type.clone())
+            .await?
+            .expect("The secret event should still exist");
+
+        let event = event
+            .deserialize_as::<SecretEventContent>()
+            .expect("We should be able to deserialize the content since that's what we uploaded");
+
+        assert!(
+            event.encrypted.is_empty(),
+            "The known secret {event_type} should have been deleted from the server"
+        );
+    }
+
+    Ok(())
+}
+
+/// When we invite another user to a room with "joined" history visibility, we
+/// share the encryption history.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_history_share_on_invite() -> Result<()> {
+    let alice_span = tracing::info_span!("alice");
+    let bob_span = tracing::info_span!("bob");
+
+    let encryption_settings =
+        EncryptionSettings { auto_enable_cross_signing: true, ..Default::default() };
+
+    let alice = TestClientBuilder::new("alice")
+        .use_sqlite()
+        .encryption_settings(encryption_settings)
+        .build()
+        .await?;
+
+    let sync_service_span = tracing::info_span!(parent: &alice_span, "sync_service");
+    let alice_sync_service = Arc::new(
+        SyncService::builder(alice.clone())
+            .with_parent_span(sync_service_span)
+            .build()
+            .await
+            .expect("Could not build alice sync service"),
+    );
+
+    alice.encryption().wait_for_e2ee_initialization_tasks().await;
+    alice_sync_service.start().await;
+
+    let bob = SyncTokenAwareClient::new(
+        TestClientBuilder::new("bob").encryption_settings(encryption_settings).build().await?,
+    );
+
+    {
+        // Alice and Bob share an encrypted room
+        // TODO: get rid of all of this: history sharing should work even if Bob and
+        //   Alice do not share a room
+        let alice_shared_room = alice
+            .create_room(assign!(CreateRoomRequest::new(), {preset: Some(RoomPreset::PublicChat)}))
+            .await?;
+        let shared_room_id = alice_shared_room.room_id();
+        alice_shared_room.enable_encryption().await?;
+        bob.join_room_by_id(shared_room_id)
+            .instrument(bob_span.clone())
+            .await
+            .expect("Bob should have joined the room");
+
+        // Bob sends a message to trigger another sync from Alice, which causes her to
+        // send out the outgoing requests
+        //
+        // FIXME: this appears to be needed due to a bug in the sliding sync client,
+        //   which means it does not send out outgoing requests caused by a
+        //   /sync response
+        let request = send_message_event::v3::Request::new_raw(
+            shared_room_id.to_owned(),
+            TransactionId::new(),
+            MessageLikeEventType::Message,
+            Raw::new(&RoomMessageEventContent::text_plain("")).unwrap().cast(),
+        );
+        bob.send(request).into_future().instrument(bob_span.clone()).await?;
+
+        // Sanity check: Both users see the others' device
+        async fn devices_seen(client: &Client, other: &UserId) -> UserDevices {
+            client
+                .olm_machine_for_testing()
+                .await
+                .as_ref()
+                .unwrap()
+                .get_user_devices(other, Some(Duration::from_secs(1)))
+                .await
+                .unwrap()
+        }
+
+        timeout(
+            async {
+                loop {
+                    let bob_devices = devices_seen(&alice, bob.user_id().unwrap()).await;
+                    if bob_devices.devices().count() >= 1 {
+                        return;
+                    }
+                }
+            },
+            Duration::from_secs(30), // This can take quite a while to happen on the CI runners.
+        )
+        .await
+        .expect("Alice did not see bob's device");
+
+        bob.sync_once().instrument(bob_span.clone()).await?;
+        let alice_devices = devices_seen(&bob, alice.user_id().unwrap()).await;
+        assert_eq!(alice_devices.devices().count(), 1, "Bob did not see Alice's device");
+    }
+
+    // Alice creates a room ...
+    let alice_room = alice
+        .create_room(assign!(CreateRoomRequest::new(), {
+            preset: Some(RoomPreset::PublicChat),
+        }))
+        .await?;
+    alice_room.enable_encryption().await?;
+
+    info!(room_id = ?alice_room.room_id(), "Alice has created and enabled encryption in the room");
+
+    // ... and sends a message
+    alice_room
+        .send(RoomMessageEventContent::text_plain("Hello Bob"))
+        .await
+        .expect("We should be able to send a message to the room");
+
+    // Alice invites Bob to the room
+    // TODO: invite Bob rather than just call `share_history`
+    alice_room.share_history(bob.user_id().unwrap()).await?;
+
+    let bob_response = bob.sync_once().instrument(bob_span.clone()).await?;
+
+    // Bob should have received a to-device event with the payload
+    assert_eq!(bob_response.to_device.len(), 1);
+    let to_device_event = &bob_response.to_device[0];
+    assert_eq!(
+        to_device_event.get_field::<String>("type").unwrap().unwrap(),
+        "io.element.msc4268.room_key_bundle"
+    );
+
+    // TODO: ensure Bob can decrypt the content
 
     Ok(())
 }

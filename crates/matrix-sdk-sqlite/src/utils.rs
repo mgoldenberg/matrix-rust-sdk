@@ -21,10 +21,11 @@ use itertools::Itertools;
 use matrix_sdk_store_encryption::StoreCipher;
 use ruma::time::SystemTime;
 use rusqlite::{limits::Limit, OptionalExtension, Params, Row, Statement, Transaction};
+use serde::{de::DeserializeOwned, Serialize};
 
 use crate::{
     error::{Error, Result},
-    OpenStoreError,
+    OpenStoreError, RuntimeConfig,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -104,35 +105,92 @@ pub(crate) trait SqliteAsyncConnExt {
         Res: Send + 'static,
         Query: Fn(&Transaction<'_>, Vec<Key>) -> Result<Vec<Res>> + Send + 'static;
 
-    /// Optimize the database.
+    /// Apply the [`RuntimeConfig`].
     ///
-    /// [The SQLite docs] recommend to run this regularly and after any schema
-    /// change. The easiest is to do it consistently when the state store is
-    /// constructed, after eventual migrations.
+    /// It will call the `Self::optimize`, `Self::cache_size` or
+    /// `Self::journal_size_limit` methods automatically based on the
+    /// `RuntimeConfig` values.
     ///
-    /// [The SQLite docs]: https://www.sqlite.org/pragma.html#pragma_optimize
-    async fn optimize(&self) -> Result<()> {
-        self.execute_batch("PRAGMA optimize=0x10002;").await?;
+    /// It is possible to call these methods individually though. This
+    /// `apply_runtime_config` method allows to automate this process.
+    async fn apply_runtime_config(&self, runtime_config: RuntimeConfig) -> Result<()> {
+        let RuntimeConfig { optimize, cache_size, journal_size_limit } = runtime_config;
+
+        if optimize {
+            self.optimize().await?;
+        }
+
+        self.cache_size(cache_size).await?;
+        self.journal_size_limit(journal_size_limit).await?;
+
         Ok(())
     }
 
-    /// Limit the size of the WAL file.
+    /// Optimize the database.
+    ///
+    /// The SQLite documentation recommends to run this regularly and after any
+    /// schema change. The easiest is to do it consistently when the store is
+    /// constructed, after eventual migrations.
+    ///
+    /// See [`PRAGMA optimize`] to learn more.
+    ///
+    /// [`PRAGMA cache_size`]: https://www.sqlite.org/pragma.html#pragma_optimize
+    async fn optimize(&self) -> Result<()> {
+        self.execute_batch("PRAGMA optimize = 0x10002;").await?;
+        Ok(())
+    }
+
+    /// Define the maximum size in **bytes** the SQLite cache can use.
+    ///
+    /// See [`PRAGMA cache_size`] to learn more.
+    ///
+    /// [`PRAGMA cache_size`]: https://www.sqlite.org/pragma.html#pragma_cache_size
+    async fn cache_size(&self, cache_size: u32) -> Result<()> {
+        // `N` in `PRAGMA cache_size = -N` is expressed in kibibytes.
+        // `cache_size` is expressed in bytes. Let's convert.
+        let n = cache_size / 1024;
+
+        self.execute_batch(format!("PRAGMA cache_size = -{n};")).await?;
+        Ok(())
+    }
+
+    /// Limit the size of the WAL file, in **bytes**.
     ///
     /// By default, while the DB connections of the databases are open, [the
-    /// size of the WAL file can keep increasing] depending on the size
-    /// needed for the transactions. A critical case is VACUUM which
-    /// basically writes the content of the DB file to the WAL file before
-    /// writing it back to the DB file, so we end up taking twice the size
-    /// of the database.
+    /// size of the WAL file can keep increasing][size_wal_file] depending on
+    /// the size needed for the transactions. A critical case is `VACUUM`
+    /// which basically writes the content of the DB file to the WAL file
+    /// before writing it back to the DB file, so we end up taking twice the
+    /// size of the database.
     ///
     /// By setting this limit, the WAL file is truncated after its content is
     /// written to the database, if it is bigger than the limit.
     ///
-    /// The limit is set to 10MB.
+    /// See [`PRAGMA journal_size_limit`] to learn more. The value `limit`
+    /// corresponds to `N` in `PRAGMA journal_size_limit = N`.
     ///
-    /// [the size of the WAL file can keep increasing]: https://www.sqlite.org/wal.html#avoiding_excessively_large_wal_files
-    async fn set_journal_size_limit(&self) -> Result<()> {
-        self.execute_batch("PRAGMA journal_size_limit = 10000000;").await.map_err(Error::from)?;
+    /// [size_wal_file]: https://www.sqlite.org/wal.html#avoiding_excessively_large_wal_files
+    /// [`PRAGMA journal_size_limit`]: https://www.sqlite.org/pragma.html#pragma_journal_size_limit
+    async fn journal_size_limit(&self, limit: u32) -> Result<()> {
+        self.execute_batch(format!("PRAGMA journal_size_limit = {limit};")).await?;
+        Ok(())
+    }
+
+    /// Defragment the database and free space on the filesystem.
+    ///
+    /// Only returns an error in tests, otherwise the error is only logged.
+    async fn vacuum(&self) -> Result<()> {
+        if let Err(error) = self.execute_batch("VACUUM").await {
+            // Since this is an optimisation step, do not propagate the error
+            // but log it.
+            #[cfg(not(any(test, debug_assertions)))]
+            tracing::warn!("Failed to vacuum database: {error}");
+
+            // We want to know if there is an error with this step during tests.
+            #[cfg(any(test, debug_assertions))]
+            return Err(error.into());
+        }
+
         Ok(())
     }
 }
@@ -244,7 +302,7 @@ impl SqliteTransactionExt for Transaction<'_> {
     {
         // Divide by 2 to allow space for more static parameters (not part of
         // `keys_to_chunk`).
-        let maximum_chunk_size = self.limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER) / 2;
+        let maximum_chunk_size = self.limit(Limit::SQLITE_LIMIT_VARIABLE_NUMBER)? / 2;
         let maximum_chunk_size: usize = maximum_chunk_size
             .try_into()
             .map_err(|_| Error::SqliteMaximumVariableNumber(maximum_chunk_size))?;
@@ -289,6 +347,14 @@ impl SqliteTransactionExt for Transaction<'_> {
 pub(crate) trait SqliteKeyValueStoreConnExt {
     /// Store the given value for the given key.
     fn set_kv(&self, key: &str, value: &[u8]) -> rusqlite::Result<()>;
+
+    /// Store the given value for the given key by serializing it.
+    fn set_serialized_kv<T: Serialize + Send>(&self, key: &str, value: T) -> Result<()> {
+        let serialized_value = rmp_serde::to_vec_named(&value)?;
+        self.set_kv(key, &serialized_value)?;
+
+        Ok(())
+    }
 
     /// Removes the current key and value if exists.
     fn clear_kv(&self, key: &str) -> rusqlite::Result<()>;
@@ -345,8 +411,24 @@ pub(crate) trait SqliteKeyValueStoreAsyncConnExt: SqliteAsyncConnExt {
             .optional()
     }
 
+    /// Get the stored serialized value for the given key.
+    async fn get_serialized_kv<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+        let Some(bytes) = self.get_kv(key).await? else {
+            return Ok(None);
+        };
+
+        Ok(Some(rmp_serde::from_slice(&bytes)?))
+    }
+
     /// Store the given value for the given key.
     async fn set_kv(&self, key: &str, value: Vec<u8>) -> rusqlite::Result<()>;
+
+    /// Store the given value for the given key by serializing it.
+    async fn set_serialized_kv<T: Serialize + Send + 'static>(
+        &self,
+        key: &str,
+        value: T,
+    ) -> Result<()>;
 
     /// Clears the given value for the given key.
     async fn clear_kv(&self, key: &str) -> rusqlite::Result<()>;
@@ -394,6 +476,17 @@ impl SqliteKeyValueStoreAsyncConnExt for SqliteAsyncConn {
     async fn set_kv(&self, key: &str, value: Vec<u8>) -> rusqlite::Result<()> {
         let key = key.to_owned();
         self.interact(move |conn| conn.set_kv(&key, &value)).await.unwrap()?;
+
+        Ok(())
+    }
+
+    async fn set_serialized_kv<T: Serialize + Send + 'static>(
+        &self,
+        key: &str,
+        value: T,
+    ) -> Result<()> {
+        let key = key.to_owned();
+        self.interact(move |conn| conn.set_serialized_kv(&key, value)).await.unwrap()?;
 
         Ok(())
     }

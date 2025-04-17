@@ -7,7 +7,7 @@ use crate::{
     client::JoinRule,
     error::ClientError,
     room::{Membership, RoomHero},
-    room_member::RoomMember,
+    room_member::{RoomMember, RoomMemberWithSenderInfo},
     utils::AsyncRuntimeDropped,
 };
 
@@ -51,11 +51,23 @@ impl RoomPreview {
     /// Leave the room if the room preview state is either joined, invited or
     /// knocked.
     ///
+    /// If rejecting an invite then also forget it as an extra layer of
+    /// protection against spam attacks.
+    ///
     /// Will return an error otherwise.
     pub async fn leave(&self) -> Result<(), ClientError> {
         let room =
             self.client.get_room(&self.inner.room_id).context("missing room for a room preview")?;
-        room.leave().await.map_err(Into::into)
+
+        let should_forget = matches!(room.state(), matrix_sdk::RoomState::Invited);
+
+        room.leave().await.map_err(ClientError::from)?;
+
+        if should_forget {
+            _ = self.forget().await;
+        }
+
+        Ok(())
     }
 
     /// Get the user who created the invite, if any.
@@ -65,31 +77,19 @@ impl RoomPreview {
         invite_details.inviter.and_then(|m| m.try_into().ok())
     }
 
-    /// Get the membership details for the current user.
-    pub async fn own_membership_details(&self) -> Option<RoomMembershipDetails> {
-        let room = self.client.get_room(&self.inner.room_id)?;
-
-        let (own_member, sender_member) = match room.own_membership_details().await {
-            Ok(memberships) => memberships,
-            Err(error) => {
-                warn!("Couldn't get membership info: {error}");
-                return None;
-            }
-        };
-
-        Some(RoomMembershipDetails {
-            own_room_member: own_member.try_into().ok()?,
-            sender_room_member: sender_member.and_then(|member| member.try_into().ok()),
-        })
+    /// Forget the room if we had access to it, and it was left or banned.
+    pub async fn forget(&self) -> Result<(), ClientError> {
+        let room =
+            self.client.get_room(&self.inner.room_id).context("missing room for a room preview")?;
+        room.forget().await?;
+        Ok(())
     }
-}
 
-/// Contains the current user's room member info and the optional room member
-/// info of the sender of the `m.room.member` event that this info represents.
-#[derive(uniffi::Record)]
-pub struct RoomMembershipDetails {
-    pub own_room_member: RoomMember,
-    pub sender_room_member: Option<RoomMember>,
+    /// Get the membership details for the current user.
+    pub async fn own_membership_details(&self) -> Option<RoomMemberWithSenderInfo> {
+        let room = self.client.get_room(&self.inner.room_id)?;
+        room.member_with_sender_info(self.client.user_id()?).await.ok()?.try_into().ok()
+    }
 }
 
 impl RoomPreview {

@@ -204,10 +204,12 @@ impl SendQueue {
         }
 
         let room_ids =
-            self.client.store().load_rooms_with_unsent_requests().await.unwrap_or_else(|err| {
-                warn!("error when loading rooms with unsent requests: {err}");
-                Vec::new()
-            });
+            self.client.state_store().load_rooms_with_unsent_requests().await.unwrap_or_else(
+                |err| {
+                    warn!("error when loading rooms with unsent requests: {err}");
+                    Vec::new()
+                },
+            );
 
         // Getting the [`RoomSendQueue`] is sufficient to spawn the task if needs be.
         for room_id in room_ids {
@@ -453,7 +455,7 @@ impl RoomSendQueue {
         let send_handle = SendHandle {
             room: self.clone(),
             transaction_id: transaction_id.clone(),
-            media_handles: None,
+            media_handles: vec![],
             created_at,
         };
 
@@ -520,7 +522,7 @@ impl RoomSendQueue {
         global_error_reporter: broadcast::Sender<SendQueueRoomError>,
         is_dropping: Arc<AtomicBool>,
     ) {
-        info!("spawned the sending task");
+        trace!("spawned the sending task");
 
         loop {
             // A request to shut down should be preferred above everything else.
@@ -702,9 +704,9 @@ impl RoomSendQueue {
 
                 let fut = async move {
                     let mime = Mime::from_str(&content_type).map_err(|_| {
-                        crate::Error::SendQueueWedgeError(QueueWedgeError::InvalidMimeType {
-                            mime_type: content_type.clone(),
-                        })
+                        crate::Error::SendQueueWedgeError(Box::new(
+                            QueueWedgeError::InvalidMimeType { mime_type: content_type.clone() },
+                        ))
                     })?;
 
                     let data = room
@@ -714,12 +716,12 @@ impl RoomSendQueue {
                         .await?
                         .get_media_content(&cache_key)
                         .await?
-                        .ok_or(crate::Error::SendQueueWedgeError(
+                        .ok_or(crate::Error::SendQueueWedgeError(Box::new(
                             QueueWedgeError::MissingMediaContent,
-                        ))?;
+                        )))?;
 
                     #[cfg(feature = "e2e-encryption")]
-                    let media_source = if room.is_encrypted().await? {
+                    let media_source = if room.latest_encryption_state().await?.is_encrypted() {
                         trace!("upload will be encrypted (encrypted room)");
                         let mut cursor = std::io::Cursor::new(data);
                         let encrypted_file = room
@@ -802,24 +804,26 @@ impl From<&crate::Error> for QueueWedgeError {
     fn from(value: &crate::Error) -> Self {
         match value {
             #[cfg(feature = "e2e-encryption")]
-            crate::Error::OlmError(OlmError::SessionRecipientCollectionError(error)) => match error
-            {
-                SessionRecipientCollectionError::VerifiedUserHasUnsignedDevice(user_map) => {
-                    QueueWedgeError::InsecureDevices { user_device_map: user_map.clone() }
-                }
+            crate::Error::OlmError(error) => match &**error {
+                OlmError::SessionRecipientCollectionError(error) => match error {
+                    SessionRecipientCollectionError::VerifiedUserHasUnsignedDevice(user_map) => {
+                        QueueWedgeError::InsecureDevices { user_device_map: user_map.clone() }
+                    }
 
-                SessionRecipientCollectionError::VerifiedUserChangedIdentity(users) => {
-                    QueueWedgeError::IdentityViolations { users: users.clone() }
-                }
+                    SessionRecipientCollectionError::VerifiedUserChangedIdentity(users) => {
+                        QueueWedgeError::IdentityViolations { users: users.clone() }
+                    }
 
-                SessionRecipientCollectionError::CrossSigningNotSetup
-                | SessionRecipientCollectionError::SendingFromUnverifiedDevice => {
-                    QueueWedgeError::CrossVerificationRequired
-                }
+                    SessionRecipientCollectionError::CrossSigningNotSetup
+                    | SessionRecipientCollectionError::SendingFromUnverifiedDevice => {
+                        QueueWedgeError::CrossVerificationRequired
+                    }
+                },
+                _ => QueueWedgeError::GenericApiError { msg: value.to_string() },
             },
 
             // Flatten errors of `Self` type.
-            crate::Error::SendQueueWedgeError(error) => error.clone(),
+            crate::Error::SendQueueWedgeError(error) => *error.clone(),
 
             _ => QueueWedgeError::GenericApiError { msg: value.to_string() },
         }
@@ -959,7 +963,7 @@ impl QueueStorage {
             .lock()
             .await
             .client()?
-            .store()
+            .state_store()
             .save_send_queue_request(
                 &self.room_id,
                 transaction_id.clone(),
@@ -982,7 +986,7 @@ impl QueueStorage {
     {
         let mut guard = self.store.lock().await;
         let queued_requests =
-            guard.client()?.store().load_send_queue_requests(&self.room_id).await?;
+            guard.client()?.state_store().load_send_queue_requests(&self.room_id).await?;
 
         if let Some(request) = queued_requests.iter().find(|queued| !queued.is_wedged()) {
             let (cancel_upload_tx, cancel_upload_rx) =
@@ -1042,7 +1046,7 @@ impl QueueStorage {
 
         Ok(guard
             .client()?
-            .store()
+            .state_store()
             .update_send_queue_request_status(&self.room_id, transaction_id, Some(reason))
             .await?)
     }
@@ -1058,7 +1062,7 @@ impl QueueStorage {
             .lock()
             .await
             .client()?
-            .store()
+            .state_store()
             .update_send_queue_request_status(&self.room_id, transaction_id, None)
             .await?)
     }
@@ -1080,7 +1084,7 @@ impl QueueStorage {
         }
 
         let client = guard.client()?;
-        let store = client.store();
+        let store = client.state_store();
 
         // Update all dependent requests.
         store
@@ -1114,7 +1118,7 @@ impl QueueStorage {
             // Save the intent to redact the event.
             guard
                 .client()?
-                .store()
+                .state_store()
                 .save_dependent_queued_request(
                     &self.room_id,
                     transaction_id,
@@ -1129,7 +1133,7 @@ impl QueueStorage {
 
         let removed = guard
             .client()?
-            .store()
+            .state_store()
             .remove_send_queue_request(&self.room_id, transaction_id)
             .await?;
 
@@ -1155,7 +1159,7 @@ impl QueueStorage {
             // Save the intent to edit the associated event.
             guard
                 .client()?
-                .store()
+                .state_store()
                 .save_dependent_queued_request(
                     &self.room_id,
                     transaction_id,
@@ -1170,7 +1174,7 @@ impl QueueStorage {
 
         let edited = guard
             .client()?
-            .store()
+            .state_store()
             .update_send_queue_request(&self.room_id, transaction_id, serializable.into())
             .await?;
 
@@ -1193,7 +1197,7 @@ impl QueueStorage {
     ) -> Result<(), RoomSendQueueStorageError> {
         let guard = self.store.lock().await;
         let client = guard.client()?;
-        let store = client.store();
+        let store = client.state_store();
         let thumbnail_info =
             if let Some((thumbnail_info, thumbnail_media_request, thumbnail_content_type)) =
                 thumbnail
@@ -1260,7 +1264,7 @@ impl QueueStorage {
                 send_event_txn.into(),
                 created_at,
                 DependentQueuedRequestKind::FinishUpload {
-                    local_echo: event,
+                    local_echo: Box::new(event),
                     file_upload: upload_file_txn.clone(),
                     thumbnail_info,
                 },
@@ -1280,7 +1284,7 @@ impl QueueStorage {
     ) -> Result<Option<ChildTransactionId>, RoomSendQueueStorageError> {
         let guard = self.store.lock().await;
         let client = guard.client()?;
-        let store = client.store();
+        let store = client.state_store();
 
         let requests = store.load_send_queue_requests(&self.room_id).await?;
 
@@ -1322,7 +1326,7 @@ impl QueueStorage {
     ) -> Result<Vec<LocalEcho>, RoomSendQueueStorageError> {
         let guard = self.store.lock().await;
         let client = guard.client()?;
-        let store = client.store();
+        let store = client.state_store();
 
         let local_requests =
             store.load_send_queue_requests(&self.room_id).await?.into_iter().filter_map(|queued| {
@@ -1334,7 +1338,7 @@ impl QueueStorage {
                             send_handle: SendHandle {
                                 room: room.clone(),
                                 transaction_id: queued.transaction_id,
-                                media_handles: None,
+                                media_handles: vec![],
                                 created_at: queued.created_at,
                             },
                             send_error: queued.error,
@@ -1386,15 +1390,15 @@ impl QueueStorage {
                     Some(LocalEcho {
                         transaction_id: dep.own_transaction_id.clone().into(),
                         content: LocalEchoContent::Event {
-                            serialized_event: SerializableEventContent::new(&local_echo.into())
+                            serialized_event: SerializableEventContent::new(&(*local_echo).into())
                                 .ok()?,
                             send_handle: SendHandle {
                                 room: room.clone(),
                                 transaction_id: dep.own_transaction_id.into(),
-                                media_handles: Some(MediaHandles {
+                                media_handles: vec![MediaHandles {
                                     upload_thumbnail_txn: thumbnail_info.map(|info| info.txn),
                                     upload_file_txn: file_upload,
-                                }),
+                                }],
                                 created_at: dep.created_at,
                             },
                             send_error: None,
@@ -1420,7 +1424,7 @@ impl QueueStorage {
         dependent_request: DependentQueuedRequest,
         new_updates: &mut Vec<RoomSendQueueUpdate>,
     ) -> Result<bool, RoomSendQueueError> {
-        let store = client.store();
+        let store = client.state_store();
 
         let parent_key = dependent_request.parent_key;
 
@@ -1618,7 +1622,7 @@ impl QueueStorage {
                     client,
                     dependent_request.own_transaction_id.into(),
                     parent_key,
-                    local_echo,
+                    *local_echo,
                     file_upload,
                     thumbnail_info,
                     new_updates,
@@ -1638,7 +1642,7 @@ impl QueueStorage {
         let guard = self.store.lock().await;
 
         let client = guard.client()?;
-        let store = client.store();
+        let store = client.state_store();
 
         let dependent_requests = store
             .load_dependent_queued_requests(&self.room_id)
@@ -1713,7 +1717,7 @@ impl QueueStorage {
             .lock()
             .await
             .client()?
-            .store()
+            .state_store()
             .remove_dependent_queued_request(&self.room_id, dependent_event_id)
             .await?)
     }
@@ -1839,6 +1843,10 @@ pub enum RoomSendQueueError {
     /// Error coming from storage.
     #[error(transparent)]
     StorageError(#[from] RoomSendQueueStorageError),
+
+    /// The attachment event failed to be created.
+    #[error("the attachment event could not be created")]
+    FailedToCreateAttachment,
 }
 
 /// An error triggered by the send queue storage.
@@ -1903,7 +1911,7 @@ pub struct SendHandle {
     transaction_id: OwnedTransactionId,
 
     /// Additional handles for a media upload.
-    media_handles: Option<MediaHandles>,
+    media_handles: Vec<MediaHandles>,
 
     /// The time at which the event to be sent has been created.
     pub created_at: MilliSecondsSinceUnixEpoch,
@@ -1911,7 +1919,7 @@ pub struct SendHandle {
 
 impl SendHandle {
     fn nyi_for_uploads(&self) -> Result<(), RoomSendQueueStorageError> {
-        if self.media_handles.is_some() {
+        if !self.media_handles.is_empty() {
             Err(RoomSendQueueStorageError::OperationNotImplementedYet)
         } else {
             Ok(())
@@ -1928,7 +1936,7 @@ impl SendHandle {
 
         let queue = &self.room.inner.queue;
 
-        if let Some(handles) = &self.media_handles {
+        for handles in &self.media_handles {
             if queue.abort_upload(&self.transaction_id, handles).await? {
                 // Propagate a cancelled update.
                 let _ = self.room.inner.updates.send(RoomSendQueueUpdate::CancelledLocalEvent {
@@ -2061,7 +2069,7 @@ impl SendHandle {
         // one entry will be updated in the store. The other two are either
         // done, or dependent requests.
 
-        if let Some(handles) = &self.media_handles {
+        for handles in &self.media_handles {
             room.queue
                 .mark_as_unwedged(&handles.upload_file_txn)
                 .await
@@ -2158,7 +2166,7 @@ impl SendReactionHandle {
         let handle = SendHandle {
             room: self.room.clone(),
             transaction_id: self.transaction_id.clone().into(),
-            media_handles: None,
+            media_handles: vec![],
             created_at: MilliSecondsSinceUnixEpoch::now(),
         };
 

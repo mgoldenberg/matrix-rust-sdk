@@ -3,12 +3,10 @@
 #![allow(dead_code)]
 
 use assert_matches2::assert_let;
-use matrix_sdk_base::{deserialized_responses::TimelineEvent, SessionMeta};
+use matrix_sdk_base::{deserialized_responses::TimelineEvent, store::RoomLoadSettings};
 use ruma::{
     api::MatrixVersion,
-    device_id,
     events::{room::message::MessageType, AnySyncMessageLikeEvent, AnySyncTimelineEvent},
-    user_id,
 };
 use url::Url;
 
@@ -16,11 +14,8 @@ pub mod client;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mocks;
 
-use crate::{
-    authentication::matrix::{MatrixSession, MatrixSessionTokens},
-    config::RequestConfig,
-    Client, ClientBuilder,
-};
+use self::client::mock_matrix_session;
+use crate::{config::RequestConfig, Client, ClientBuilder};
 
 /// Checks that an event is a message-like text event with the given text.
 #[track_caller]
@@ -58,13 +53,7 @@ pub async fn no_retry_test_client(homeserver_url: Option<String>) -> Client {
 pub async fn set_client_session(client: &Client) {
     client
         .matrix_auth()
-        .restore_session(MatrixSession {
-            meta: SessionMeta {
-                user_id: user_id!("@example:localhost").to_owned(),
-                device_id: device_id!("DEVICEID").to_owned(),
-            },
-            tokens: MatrixSessionTokens { access_token: "1234".to_owned(), refresh_token: None },
-        })
+        .restore_session(mock_matrix_session(), RoomLoadSettings::default())
         .await
         .unwrap();
 }
@@ -247,17 +236,17 @@ macro_rules! assert_next_eq_with_timeout_impl {
 
         assert_eq!(next_value, $expected);
     };
-    ($stream:expr, $expected:expr, $timeout:expr, $($msg:tt)*) => {
+    ($stream:expr, $expected:expr, $timeout:expr, $($msg:tt)*) => {{
         let next_value = tokio::time::timeout(
             $timeout,
-            $stream.next()
+            futures_util::StreamExt::next(&mut $stream)
         )
         .await
         .expect("We should be able to get the next value out of the stream by now")
         .expect("The stream should have given us a new value instead of None");
 
         assert_eq!(next_value, $expected, $($msg)*);
-    };
+    }};
 }
 
 /// Like `assert_let`, but with the possibility to add an optional timeout.

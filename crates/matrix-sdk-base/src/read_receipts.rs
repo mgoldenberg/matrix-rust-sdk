@@ -110,8 +110,8 @@
 //!   events ids in both sets. As a matter of fact, we have to manually handle
 //!   this edge case here. I hope that having an event database will help avoid
 //!   this kind of workaround here later.
-//! - In addition to that, and as noted in the timeline code, it seems that the
-//!   sliding-sync proxy could return the same event multiple times in a sync
+//! - In addition to that, and as noted in the timeline code, it seems that
+//!   sliding sync could return the same event multiple times in a sync
 //!   timeline, leading to incorrect results. We have to take that into account
 //!   by resetting the read counts *every* time we see an event that was the
 //!   target of the latest active read receipt.
@@ -245,10 +245,9 @@ impl RoomReadReceipts {
         let mut counting_receipts = false;
 
         for event in events {
-            // The sliding sync proxy sometimes sends the same event multiple times, so it
-            // can be at the beginning and end of a batch, for instance. In that
-            // case, just reset every time we see the event matching the
-            // receipt. NOTE: SS proxy workaround.
+            // Sliding sync sometimes sends the same event multiple times, so it can be at
+            // the beginning and end of a batch, for instance. In that case, just reset
+            // every time we see the event matching the receipt.
             if let Some(event_id) = event.event_id() {
                 if event_id == receipt_event_id {
                     // Bingo! Switch over to the counting state, after resetting the
@@ -925,7 +924,7 @@ mod tests {
         let receipt_event = f
             .read_receipts()
             .add(receipt_event_id, user_id, ReceiptType::Read, ReceiptThread::Unthreaded)
-            .build();
+            .into_content();
 
         let mut read_receipts = Default::default();
         compute_unread_counts(
@@ -1007,7 +1006,7 @@ mod tests {
                                 receipt_type_1.clone(),
                                 receipt_thread_2.clone(),
                             )
-                            .build();
+                            .into_content();
 
                         // When I compute the notifications for this room (with no new events),
                         let mut read_receipts = RoomReadReceipts::default();
@@ -1070,7 +1069,7 @@ mod tests {
         let receipt_event = EventFactory::new()
             .read_receipts()
             .add(event_id!("$6"), &user_id, ReceiptType::Read, ReceiptThread::Unthreaded)
-            .build();
+            .into_content();
 
         let mut read_receipts = RoomReadReceipts::default();
         assert!(read_receipts.pending.is_empty());
@@ -1104,7 +1103,7 @@ mod tests {
         let receipt_event = EventFactory::new()
             .read_receipts()
             .add(event_id!("$1"), &user_id, ReceiptType::Read, ReceiptThread::Unthreaded)
-            .build();
+            .into_content();
 
         // Sync with a read receipt *and* a single event that was already known: in that
         // case, only consider the new events in isolation, and compute the
@@ -1372,7 +1371,7 @@ mod tests {
                     ReceiptType::Read,
                     ReceiptThread::Thread(owned_event_id!("$2")),
                 )
-                .build();
+                .into_content();
 
             let pending = selector.handle_new_receipt(myself, &receipt_event);
             assert!(pending.is_empty());
@@ -1391,7 +1390,7 @@ mod tests {
                     let receipt_event = f
                         .read_receipts()
                         .add(event_id!("$6"), myself, receipt_type.clone(), receipt_thread.clone())
-                        .build();
+                        .into_content();
 
                     let pending = selector.handle_new_receipt(myself, &receipt_event);
                     assert_eq!(pending[0], event_id!("$6"));
@@ -1409,7 +1408,7 @@ mod tests {
                     let receipt_event = f
                         .read_receipts()
                         .add(event_id!("$3"), myself, receipt_type.clone(), receipt_thread.clone())
-                        .build();
+                        .into_content();
 
                     let pending = selector.handle_new_receipt(myself, &receipt_event);
                     assert!(pending.is_empty());
@@ -1426,7 +1425,7 @@ mod tests {
                     let receipt_event = f
                         .read_receipts()
                         .add(event_id!("$3"), myself, receipt_type.clone(), receipt_thread.clone())
-                        .build();
+                        .into_content();
 
                     let pending = selector.handle_new_receipt(myself, &receipt_event);
                     assert!(pending.is_empty());
@@ -1443,7 +1442,7 @@ mod tests {
                     let receipt_event = f
                         .read_receipts()
                         .add(event_id!("$3"), myself, receipt_type.clone(), receipt_thread.clone())
-                        .build();
+                        .into_content();
 
                     let pending = selector.handle_new_receipt(myself, &receipt_event);
                     assert!(pending.is_empty());
@@ -1464,7 +1463,7 @@ mod tests {
                 .add(event_id!("$4"), myself, ReceiptType::ReadPrivate, ReceiptThread::Unthreaded)
                 .add(event_id!("$6"), myself, ReceiptType::ReadPrivate, ReceiptThread::Main)
                 .add(event_id!("$3"), myself, ReceiptType::Read, ReceiptThread::Main)
-                .build();
+                .into_content();
 
             let pending = selector.handle_new_receipt(myself, &receipt_event);
             assert_eq!(pending.len(), 1);
@@ -1542,7 +1541,7 @@ mod tests {
         let receipt_event = f
             .read_receipts()
             .add(event_id!("$3"), user_id, ReceiptType::Read, ReceiptThread::Unthreaded)
-            .build();
+            .into_content();
 
         let mut read_receipts = RoomReadReceipts::default();
 

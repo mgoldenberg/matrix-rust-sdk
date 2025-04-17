@@ -1,19 +1,20 @@
 use std::{collections::HashMap, pin::pin, sync::Arc};
 
 use anyhow::{Context, Result};
+use async_compat::get_runtime_handle;
 use futures_util::{pin_mut, StreamExt};
 use matrix_sdk::{
     crypto::LocalTrust,
     room::{
         edit::EditedContent, power_levels::RoomPowerLevelChanges, Room as SdkRoom, RoomMemberRole,
+        TryFromReportedContentScoreError,
     },
-    ComposerDraft as SdkComposerDraft, ComposerDraftType as SdkComposerDraftType,
+    ComposerDraft as SdkComposerDraft, ComposerDraftType as SdkComposerDraftType, EncryptionState,
     RoomHero as SdkRoomHero, RoomMemberships, RoomState,
 };
 use matrix_sdk_ui::timeline::{default_event_filter, RoomExt};
 use mime::Mime;
 use ruma::{
-    api::client::room::report_content,
     assign,
     events::{
         call::notify,
@@ -30,7 +31,6 @@ use ruma::{
 use tokio::sync::RwLock;
 use tracing::{error, warn};
 
-use super::RUNTIME;
 use crate::{
     chunk_iterator::ChunkIterator,
     client::{JoinRule, RoomVisibility},
@@ -39,10 +39,10 @@ use crate::{
     identity_status_change::IdentityStatusChange,
     live_location_share::{LastLocation, LiveLocationShare},
     room_info::RoomInfo,
-    room_member::RoomMember,
+    room_member::{RoomMember, RoomMemberWithSenderInfo},
     ruma::{ImageInfo, LocationContent, Mentions, NotifyType},
     timeline::{
-        configuration::{AllowedMessageTypes, TimelineConfiguration},
+        configuration::{TimelineConfiguration, TimelineFilter},
         ReceiptType, SendHandle, Timeline,
     },
     utils::u64_to_uint,
@@ -110,8 +110,8 @@ impl Room {
         self.inner.avatar_url().map(|m| m.to_string())
     }
 
-    pub fn is_direct(&self) -> bool {
-        RUNTIME.block_on(self.inner.is_direct()).unwrap_or(false)
+    pub async fn is_direct(&self) -> bool {
+        self.inner.is_direct().await.unwrap_or(false)
     }
 
     pub fn is_public(&self) -> bool {
@@ -161,21 +161,6 @@ impl Room {
         self.inner.active_room_call_participants().iter().map(|u| u.to_string()).collect()
     }
 
-    /// For rooms one is invited to, retrieves the room member information for
-    /// the user who invited the logged-in user to a room.
-    pub async fn inviter(&self) -> Option<RoomMember> {
-        if self.inner.state() == RoomState::Invited {
-            self.inner
-                .invite_details()
-                .await
-                .ok()
-                .and_then(|a| a.inviter)
-                .and_then(|m| m.try_into().ok())
-        } else {
-            None
-        }
-    }
-
     /// Forces the currently active room key, which is used to encrypt messages,
     /// to be rotated.
     ///
@@ -206,30 +191,50 @@ impl Room {
     ) -> Result<Arc<Timeline>, ClientError> {
         let mut builder = matrix_sdk_ui::timeline::Timeline::builder(&self.inner);
 
-        builder = builder.with_focus(configuration.focus.try_into()?);
+        builder = builder
+            .with_focus(configuration.focus.try_into()?)
+            .with_date_divider_mode(configuration.date_divider_mode.into());
 
-        if let AllowedMessageTypes::Only { types } = configuration.allowed_message_types {
-            builder = builder.event_filter(move |event, room_version_id| {
-                default_event_filter(event, room_version_id)
-                    && match event {
-                        AnySyncTimelineEvent::MessageLike(msg) => match msg.original_content() {
-                            Some(AnyMessageLikeEventContent::RoomMessage(content)) => {
-                                types.contains(&content.msgtype.into())
+        if configuration.track_read_receipts {
+            builder = builder.track_read_marker_and_receipts();
+        }
+
+        match configuration.filter {
+            TimelineFilter::All => {
+                // #nofilter.
+            }
+
+            TimelineFilter::OnlyMessage { types } => {
+                builder = builder.event_filter(move |event, room_version_id| {
+                    default_event_filter(event, room_version_id)
+                        && match event {
+                            AnySyncTimelineEvent::MessageLike(msg) => {
+                                match msg.original_content() {
+                                    Some(AnyMessageLikeEventContent::RoomMessage(content)) => {
+                                        types.contains(&content.msgtype.into())
+                                    }
+                                    _ => false,
+                                }
                             }
                             _ => false,
-                        },
-                        _ => false,
-                    }
-            });
+                        }
+                });
+            }
+
+            TimelineFilter::EventTypeFilter { filter: event_type_filter } => {
+                builder = builder.event_filter(move |event, room_version_id| {
+                    // Always perform the default filter first
+                    default_event_filter(event, room_version_id) && event_type_filter.filter(event)
+                });
+            }
         }
 
         if let Some(internal_id_prefix) = configuration.internal_id_prefix {
             builder = builder.with_internal_id_prefix(internal_id_prefix);
         }
 
-        builder = builder.with_date_divider_mode(configuration.date_divider_mode.into());
-
         let timeline = builder.build().await?;
+
         Ok(Timeline::new(timeline))
     }
 
@@ -237,8 +242,12 @@ impl Room {
         self.inner.room_id().to_string()
     }
 
-    pub fn is_encrypted(&self) -> Result<bool, ClientError> {
-        Ok(RUNTIME.block_on(self.inner.is_encrypted())?)
+    pub fn encryption_state(&self) -> EncryptionState {
+        self.inner.encryption_state()
+    }
+
+    pub async fn latest_encryption_state(&self) -> Result<EncryptionState, ClientError> {
+        Ok(self.inner.latest_encryption_state().await?)
     }
 
     pub async fn members(&self) -> Result<Arc<RoomMembersIterator>, ClientError> {
@@ -252,13 +261,13 @@ impl Room {
     }
 
     pub async fn member(&self, user_id: String) -> Result<RoomMember, ClientError> {
-        let user_id = UserId::parse(&*user_id).context("Invalid user id.")?;
+        let user_id = UserId::parse(&*user_id)?;
         let member = self.inner.get_member(&user_id).await?.context("User not found")?;
         Ok(member.try_into().context("Unknown state membership")?)
     }
 
     pub async fn member_avatar_url(&self, user_id: String) -> Result<Option<String>, ClientError> {
-        let user_id = UserId::parse(&*user_id).context("Invalid user id.")?;
+        let user_id = UserId::parse(&*user_id)?;
         let member = self.inner.get_member(&user_id).await?.context("User not found")?;
         let avatar_url_string = member.avatar_url().map(|m| m.to_string());
         Ok(avatar_url_string)
@@ -268,10 +277,26 @@ impl Room {
         &self,
         user_id: String,
     ) -> Result<Option<String>, ClientError> {
-        let user_id = UserId::parse(&*user_id).context("Invalid user id.")?;
+        let user_id = UserId::parse(&*user_id)?;
         let member = self.inner.get_member(&user_id).await?.context("User not found")?;
         let avatar_url_string = member.display_name().map(|m| m.to_owned());
         Ok(avatar_url_string)
+    }
+
+    /// Get the membership details for the current user.
+    ///
+    /// Returns:
+    ///     - If the user was present in the room, a
+    ///       [`matrix_sdk::room::RoomMemberWithSenderInfo`] containing both the
+    ///       user info and the member info of the sender of the `m.room.member`
+    ///       event.
+    ///     - If the current user is not present, an error.
+    pub async fn member_with_sender_info(
+        &self,
+        user_id: String,
+    ) -> Result<RoomMemberWithSenderInfo, ClientError> {
+        let user_id = UserId::parse(&*user_id)?;
+        self.inner.member_with_sender_info(&user_id).await?.try_into()
     }
 
     pub async fn room_info(&self) -> Result<RoomInfo, ClientError> {
@@ -283,7 +308,7 @@ impl Room {
         listener: Box<dyn RoomInfoListener>,
     ) -> Arc<TaskHandle> {
         let mut subscriber = self.inner.subscribe_info();
-        Arc::new(TaskHandle::new(RUNTIME.spawn(async move {
+        Arc::new(TaskHandle::new(get_runtime_handle().spawn(async move {
             while subscriber.next().await.is_some() {
                 match self.room_info().await {
                     Ok(room_info) => listener.call(room_info),
@@ -321,8 +346,11 @@ impl Room {
     ///
     /// * `content` - The content of the event to send encoded as JSON string.
     pub async fn send_raw(&self, event_type: String, content: String) -> Result<(), ClientError> {
-        let content_json: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| ClientError::Generic { msg: format!("Failed to parse JSON: {e}") })?;
+        let content_json: serde_json::Value =
+            serde_json::from_str(&content).map_err(|e| ClientError::Generic {
+                msg: format!("Failed to parse JSON: {e}"),
+                details: Some(format!("{e:?}")),
+            })?;
 
         self.inner.send_raw(&event_type, content_json).await?;
 
@@ -375,17 +403,32 @@ impl Room {
         score: Option<i32>,
         reason: Option<String>,
     ) -> Result<(), ClientError> {
-        let event_id = EventId::parse(event_id)?;
-        let int_score = score.map(|value| value.into());
         self.inner
-            .client()
-            .send(report_content::v3::Request::new(
-                self.inner.room_id().into(),
-                event_id,
-                int_score,
+            .report_content(
+                EventId::parse(event_id)?,
+                score.map(TryFrom::try_from).transpose().map_err(
+                    |error: TryFromReportedContentScoreError| ClientError::from_err(error),
+                )?,
                 reason,
-            ))
+            )
             .await?;
+
+        Ok(())
+    }
+
+    /// Reports a room as inappropriate to the server.
+    /// The caller is not required to be joined to the room to report it.
+    ///
+    /// # Arguments
+    ///
+    /// * `reason` - The reason the room is being reported.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the room is not found or on rate limit
+    pub async fn report_room(&self, reason: Option<String>) -> Result<(), ClientError> {
+        self.inner.report_room(reason).await?;
+
         Ok(())
     }
 
@@ -569,7 +612,7 @@ impl Room {
         self: Arc<Self>,
         listener: Box<dyn TypingNotificationsListener>,
     ) -> Arc<TaskHandle> {
-        Arc::new(TaskHandle::new(RUNTIME.spawn(async move {
+        Arc::new(TaskHandle::new(get_runtime_handle().spawn(async move {
             let (_event_handler_drop_guard, mut subscriber) =
                 self.inner.subscribe_to_typing_notifications();
             while let Ok(typing_user_ids) = subscriber.recv().await {
@@ -580,29 +623,28 @@ impl Room {
         })))
     }
 
-    pub fn subscribe_to_identity_status_changes(
+    pub async fn subscribe_to_identity_status_changes(
         &self,
         listener: Box<dyn IdentityStatusChangeListener>,
-    ) -> Arc<TaskHandle> {
+    ) -> Result<Arc<TaskHandle>, ClientError> {
         let room = self.inner.clone();
-        Arc::new(TaskHandle::new(RUNTIME.spawn(async move {
-            let status_changes = room.subscribe_to_identity_status_changes().await;
-            if let Ok(status_changes) = status_changes {
-                // TODO: what to do with failures?
-                let mut status_changes = pin!(status_changes);
-                while let Some(identity_status_changes) = status_changes.next().await {
-                    listener.call(
-                        identity_status_changes
-                            .into_iter()
-                            .map(|change| {
-                                let user_id = change.user_id.to_string();
-                                IdentityStatusChange { user_id, changed_to: change.changed_to }
-                            })
-                            .collect(),
-                    );
-                }
+
+        let status_changes = room.subscribe_to_identity_status_changes().await?;
+
+        Ok(Arc::new(TaskHandle::new(get_runtime_handle().spawn(async move {
+            let mut status_changes = pin!(status_changes);
+            while let Some(identity_status_changes) = status_changes.next().await {
+                listener.call(
+                    identity_status_changes
+                        .into_iter()
+                        .map(|change| {
+                            let user_id = change.user_id.to_string();
+                            IdentityStatusChange { user_id, changed_to: change.changed_to }
+                        })
+                        .collect(),
+                );
             }
-        })))
+        }))))
     }
 
     /// Set (or unset) a flag on the room to indicate that the user has
@@ -648,10 +690,7 @@ impl Room {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        self.inner
-            .update_power_levels(updates)
-            .await
-            .map_err(|e| ClientError::Generic { msg: e.to_string() })?;
+        self.inner.update_power_levels(updates).await.map_err(ClientError::from_err)?;
         Ok(())
     }
 
@@ -853,7 +892,7 @@ impl Room {
     ) -> Result<Arc<TaskHandle>, ClientError> {
         let (stream, seen_ids_cleanup_handle) = self.inner.subscribe_to_knock_requests().await?;
 
-        let handle = Arc::new(TaskHandle::new(RUNTIME.spawn(async move {
+        let handle = Arc::new(TaskHandle::new(get_runtime_handle().spawn(async move {
             pin_mut!(stream);
             while let Some(requests) = stream.next().await {
                 listener.call(requests.into_iter().map(Into::into).collect());
@@ -1003,9 +1042,9 @@ impl Room {
     ) -> Arc<TaskHandle> {
         let room = self.inner.clone();
 
-        Arc::new(TaskHandle::new(RUNTIME.spawn(async move {
+        Arc::new(TaskHandle::new(get_runtime_handle().spawn(async move {
             let subscription = room.observe_live_location_shares();
-            let mut stream = subscription.subscribe();
+            let stream = subscription.subscribe();
             let mut pinned_stream = pin!(stream);
 
             while let Some(event) = pinned_stream.next().await {

@@ -1,5 +1,6 @@
 use std::sync::{Arc, RwLock};
 
+use async_compat::get_runtime_handle;
 use futures_util::StreamExt;
 use matrix_sdk::{
     encryption::{
@@ -7,13 +8,13 @@ use matrix_sdk::{
         verification::{SasState, SasVerification, VerificationRequest, VerificationRequestState},
         Encryption,
     },
-    ruma::events::{key::verification::VerificationMethod, AnyToDeviceEvent},
+    ruma::events::key::verification::VerificationMethod,
+    Account,
 };
 use ruma::UserId;
-use tracing::{error, info};
+use tracing::{error, warn};
 
-use super::RUNTIME;
-use crate::{error::ClientError, utils::Timestamp};
+use crate::{client::UserProfile, error::ClientError, utils::Timestamp};
 
 #[derive(uniffi::Object)]
 pub struct SessionVerificationEmoji {
@@ -39,12 +40,12 @@ pub enum SessionVerificationData {
 }
 
 /// Details about the incoming verification request
-#[derive(Debug, uniffi::Record)]
+#[derive(uniffi::Record)]
 pub struct SessionVerificationRequestDetails {
-    sender_id: String,
+    sender_profile: UserProfile,
     flow_id: String,
     device_id: String,
-    display_name: Option<String>,
+    device_display_name: Option<String>,
     /// First time this device was seen in milliseconds since epoch.
     first_seen_timestamp: Timestamp,
 }
@@ -66,6 +67,7 @@ pub type Delegate = Arc<RwLock<Option<Box<dyn SessionVerificationControllerDeleg
 pub struct SessionVerificationController {
     encryption: Encryption,
     user_identity: UserIdentity,
+    account: Account,
     delegate: Delegate,
     verification_request: Arc<RwLock<Option<VerificationRequest>>>,
     sas_verification: Arc<RwLock<Option<SasVerification>>>,
@@ -92,17 +94,9 @@ impl SessionVerificationController {
             .encryption
             .get_verification_request(&sender_id, flow_id)
             .await
-            .ok_or(ClientError::new("Unknown session verification request"))?;
+            .ok_or(ClientError::from_str("Unknown session verification request", None))?;
 
-        *self.verification_request.write().unwrap() = Some(verification_request.clone());
-
-        RUNTIME.spawn(Self::listen_to_verification_request_changes(
-            verification_request,
-            self.sas_verification.clone(),
-            self.delegate.clone(),
-        ));
-
-        Ok(())
+        self.set_ongoing_verification_request(verification_request)
     }
 
     /// Accept the previously acknowledged verification request
@@ -118,7 +112,7 @@ impl SessionVerificationController {
     }
 
     /// Request verification for the current device
-    pub async fn request_verification(&self) -> Result<(), ClientError> {
+    pub async fn request_device_verification(&self) -> Result<(), ClientError> {
         let methods = vec![VerificationMethod::SasV1];
         let verification_request = self
             .user_identity
@@ -126,15 +120,31 @@ impl SessionVerificationController {
             .await
             .map_err(anyhow::Error::from)?;
 
-        *self.verification_request.write().unwrap() = Some(verification_request.clone());
+        self.set_ongoing_verification_request(verification_request)
+    }
 
-        RUNTIME.spawn(Self::listen_to_verification_request_changes(
-            verification_request,
-            self.sas_verification.clone(),
-            self.delegate.clone(),
-        ));
+    /// Request verification for the given user
+    pub async fn request_user_verification(&self, user_id: String) -> Result<(), ClientError> {
+        let user_id = UserId::parse(user_id)?;
 
-        Ok(())
+        let user_identity = self
+            .encryption
+            .get_user_identity(&user_id)
+            .await?
+            .ok_or(ClientError::from_str("Unknown user identity", None))?;
+
+        if user_identity.is_verified() {
+            return Err(ClientError::from_str("User is already verified", None));
+        }
+
+        let methods = vec![VerificationMethod::SasV1];
+
+        let verification_request = user_identity
+            .request_verification_with_methods(methods)
+            .await
+            .map_err(anyhow::Error::from)?;
+
+        self.set_ongoing_verification_request(verification_request)
     }
 
     /// Transition the current verification request into a SAS verification
@@ -143,7 +153,7 @@ impl SessionVerificationController {
         let verification_request = self.verification_request.read().unwrap().clone();
 
         let Some(verification_request) = verification_request else {
-            return Err(ClientError::new("Verification request missing."));
+            return Err(ClientError::from_str("Verification request missing.", None));
         };
 
         match verification_request.start_sas().await {
@@ -155,7 +165,8 @@ impl SessionVerificationController {
                 }
 
                 let delegate = self.delegate.clone();
-                RUNTIME.spawn(Self::listen_to_sas_verification_changes(verification, delegate));
+                get_runtime_handle()
+                    .spawn(Self::listen_to_sas_verification_changes(verification, delegate));
             }
             _ => {
                 if let Some(delegate) = &*self.delegate.read().unwrap() {
@@ -172,7 +183,7 @@ impl SessionVerificationController {
         let sas_verification = self.sas_verification.read().unwrap().clone();
 
         let Some(sas_verification) = sas_verification else {
-            return Err(ClientError::new("SAS verification missing"));
+            return Err(ClientError::from_str("SAS verification missing", None));
         };
 
         Ok(sas_verification.confirm().await?)
@@ -183,7 +194,7 @@ impl SessionVerificationController {
         let sas_verification = self.sas_verification.read().unwrap().clone();
 
         let Some(sas_verification) = sas_verification else {
-            return Err(ClientError::new("SAS verification missing"));
+            return Err(ClientError::from_str("SAS verification missing", None));
         };
 
         Ok(sas_verification.mismatch().await?)
@@ -194,7 +205,7 @@ impl SessionVerificationController {
         let verification_request = self.verification_request.read().unwrap().clone();
 
         let Some(verification_request) = verification_request else {
-            return Err(ClientError::new("Verification request missing."));
+            return Err(ClientError::from_str("Verification request missing.", None));
         };
 
         Ok(verification_request.cancel().await?)
@@ -202,50 +213,94 @@ impl SessionVerificationController {
 }
 
 impl SessionVerificationController {
-    pub(crate) fn new(encryption: Encryption, user_identity: UserIdentity) -> Self {
+    pub(crate) fn new(
+        encryption: Encryption,
+        user_identity: UserIdentity,
+        account: Account,
+    ) -> Self {
         SessionVerificationController {
             encryption,
             user_identity,
+            account,
             delegate: Arc::new(RwLock::new(None)),
             verification_request: Arc::new(RwLock::new(None)),
             sas_verification: Arc::new(RwLock::new(None)),
         }
     }
 
-    pub(crate) async fn process_to_device_message(&self, event: AnyToDeviceEvent) {
-        if let AnyToDeviceEvent::KeyVerificationRequest(event) = event {
-            info!("Received verification request: {:}", event.sender);
-
-            let Some(request) = self
-                .encryption
-                .get_verification_request(&event.sender, &event.content.transaction_id)
-                .await
-            else {
-                error!("Failed retrieving verification request");
-                return;
-            };
-
-            if !request.is_self_verification() {
-                info!("Received non-self verification request. Ignoring.");
-                return;
-            }
-
-            let VerificationRequestState::Requested { other_device_data, .. } = request.state()
-            else {
-                error!("Received key verification event but the request is in the wrong state.");
-                return;
-            };
-
-            if let Some(delegate) = &*self.delegate.read().unwrap() {
-                delegate.did_receive_verification_request(SessionVerificationRequestDetails {
-                    sender_id: request.other_user_id().into(),
-                    flow_id: request.flow_id().into(),
-                    device_id: other_device_data.device_id().into(),
-                    display_name: other_device_data.display_name().map(str::to_string),
-                    first_seen_timestamp: other_device_data.first_time_seen_ts().into(),
-                });
+    /// Ask the controller to process an incoming request based on the sender
+    /// and flow identifier. It will fetch the request, verify that it's in the
+    /// correct state and then and notify the delegate.
+    pub(crate) async fn process_incoming_verification_request(
+        &self,
+        sender: &UserId,
+        flow_id: impl AsRef<str>,
+    ) {
+        if sender != self.user_identity.user_id() {
+            if let Some(status) = self.encryption.cross_signing_status().await {
+                if !status.is_complete() {
+                    warn!("Cannot verify other users until our own device's cross-signing status is complete: {:?}", status);
+                    return;
+                }
             }
         }
+
+        let Some(request) = self.encryption.get_verification_request(sender, flow_id).await else {
+            error!("Failed retrieving verification request");
+            return;
+        };
+
+        let VerificationRequestState::Requested { other_device_data, .. } = request.state() else {
+            error!("Received verification request event but the request is in the wrong state.");
+            return;
+        };
+
+        let Ok(sender_profile) = self.account.fetch_user_profile_of(sender).await else {
+            error!("Failed fetching user profile for verification request");
+            return;
+        };
+
+        if let Some(delegate) = &*self.delegate.read().unwrap() {
+            delegate.did_receive_verification_request(SessionVerificationRequestDetails {
+                sender_profile: UserProfile {
+                    user_id: request.other_user_id().to_string(),
+                    display_name: sender_profile.displayname,
+                    avatar_url: sender_profile.avatar_url.as_ref().map(|url| url.to_string()),
+                },
+                flow_id: request.flow_id().into(),
+                device_id: other_device_data.device_id().into(),
+                device_display_name: other_device_data.display_name().map(str::to_string),
+                first_seen_timestamp: other_device_data.first_time_seen_ts().into(),
+            });
+        }
+    }
+
+    fn set_ongoing_verification_request(
+        &self,
+        verification_request: VerificationRequest,
+    ) -> Result<(), ClientError> {
+        if let Some(ongoing_verification_request) =
+            self.verification_request.read().unwrap().clone()
+        {
+            if !ongoing_verification_request.is_done()
+                && !ongoing_verification_request.is_cancelled()
+            {
+                return Err(ClientError::from_str(
+                    "There is another verification flow ongoing.",
+                    None,
+                ));
+            }
+        }
+
+        *self.verification_request.write().unwrap() = Some(verification_request.clone());
+
+        get_runtime_handle().spawn(Self::listen_to_verification_request_changes(
+            verification_request,
+            self.sas_verification.clone(),
+            self.delegate.clone(),
+        ));
+
+        Ok(())
     }
 
     async fn listen_to_verification_request_changes(
@@ -271,7 +326,7 @@ impl SessionVerificationController {
                         }
 
                         let delegate = delegate.clone();
-                        RUNTIME.spawn(Self::listen_to_sas_verification_changes(
+                        get_runtime_handle().spawn(Self::listen_to_sas_verification_changes(
                             verification,
                             delegate,
                         ));

@@ -7,8 +7,7 @@ use std::{
 };
 
 use eyeball::{Observable, SharedObservable};
-use matrix_sdk_base::sliding_sync::http;
-use ruma::events::StateEventType;
+use ruma::{api::client::sync::sync_events::v5 as http, events::StateEventType};
 use tokio::sync::broadcast::Sender;
 
 use super::{
@@ -35,7 +34,6 @@ struct SlidingSyncListCachedData {
 pub struct SlidingSyncListBuilder {
     sync_mode: SlidingSyncMode,
     required_state: Vec<(StateEventType, String)>,
-    include_heroes: Option<bool>,
     filters: Option<http::request::ListFilters>,
     timeline_limit: Bound,
     pub(crate) name: String,
@@ -58,7 +56,6 @@ impl fmt::Debug for SlidingSyncListBuilder {
             .debug_struct("SlidingSyncListBuilder")
             .field("sync_mode", &self.sync_mode)
             .field("required_state", &self.required_state)
-            .field("include_heroes", &self.include_heroes)
             .field("filters", &self.filters)
             .field("timeline_limit", &self.timeline_limit)
             .field("name", &self.name)
@@ -74,7 +71,6 @@ impl SlidingSyncListBuilder {
                 (StateEventType::RoomEncryption, "".to_owned()),
                 (StateEventType::RoomTombstone, "".to_owned()),
             ],
-            include_heroes: None,
             filters: None,
             timeline_limit: 1,
             name: name.into(),
@@ -109,12 +105,6 @@ impl SlidingSyncListBuilder {
         self
     }
 
-    /// Include heroes.
-    pub fn include_heroes(mut self, value: Option<bool>) -> Self {
-        self.include_heroes = value;
-        self
-    }
-
     /// Any filters to apply to the query.
     pub fn filters(mut self, value: Option<http::request::ListFilters>) -> Self {
         self.filters = value;
@@ -146,7 +136,7 @@ impl SlidingSyncListBuilder {
         self.cache_policy = SlidingSyncListCachePolicy::Enabled;
 
         if let Some(frozen_list) =
-            restore_sliding_sync_list(client.store(), storage_key, &self.name).await?
+            restore_sliding_sync_list(client.state_store(), storage_key, &self.name).await?
         {
             assert!(
                 self.reloaded_cached_data.is_none(),
@@ -173,11 +163,7 @@ impl SlidingSyncListBuilder {
 
                 // From the builder
                 sticky: StdRwLock::new(SlidingSyncStickyManager::new(
-                    SlidingSyncListStickyParameters::new(
-                        self.required_state,
-                        self.include_heroes,
-                        self.filters,
-                    ),
+                    SlidingSyncListStickyParameters::new(self.required_state, self.filters),
                 )),
                 timeline_limit: StdRwLock::new(self.timeline_limit),
                 name: self.name,

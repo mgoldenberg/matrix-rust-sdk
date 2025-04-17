@@ -32,7 +32,7 @@ use ruma::{
             upload_signatures::v3::{Request as SignatureUploadRequest, SignedKeys},
         },
     },
-    events::AnyToDeviceEvent,
+    events::{room::history_visibility::HistoryVisibility, AnyToDeviceEvent},
     serde::Raw,
     DeviceId, DeviceKeyAlgorithm, DeviceKeyId, MilliSecondsSinceUnixEpoch, OneTimeKeyAlgorithm,
     OneTimeKeyId, OwnedDeviceId, OwnedDeviceKeyId, OwnedOneTimeKeyId, OwnedUserId, RoomId,
@@ -220,6 +220,7 @@ impl StaticAccountData {
 
         let sender_key = identity_keys.curve25519;
         let signing_key = identity_keys.ed25519;
+        let shared_history = shared_history_from_history_visibility(&visibility);
 
         let inbound = InboundGroupSession::new(
             sender_key,
@@ -229,6 +230,7 @@ impl StaticAccountData {
             own_sender_data,
             algorithm,
             Some(visibility),
+            shared_history,
         )?;
 
         Ok((outbound, inbound))
@@ -1462,6 +1464,9 @@ impl Account {
             )
             .into())
         } else {
+            // If the event contained sender_device_keys, check them now.
+            Self::check_sender_device_keys(event.as_ref(), sender_key)?;
+
             // If this event is an `m.room_key` event, defer the check for the
             // Ed25519 key of the sender until we decrypt room events. This
             // ensures that we receive the room key even if we don't have access
@@ -1494,6 +1499,57 @@ impl Account {
         }
     }
 
+    /// If the plaintext of the decrypted message includes a
+    /// `sender_device_keys` property per [MSC4147], check that it is valid.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The decrypted and deserialized plaintext of the event.
+    /// * `sender_key` - The curve25519 key of the sender of the event.
+    ///
+    /// [MSC4147]: https://github.com/matrix-org/matrix-spec-proposals/pull/4147
+    fn check_sender_device_keys(
+        event: &AnyDecryptedOlmEvent,
+        sender_key: Curve25519PublicKey,
+    ) -> OlmResult<()> {
+        let Some(sender_device_keys) = event.sender_device_keys() else {
+            return Ok(());
+        };
+
+        // Check the signature within the device_keys structure
+        let sender_device_data = DeviceData::try_from(sender_device_keys).map_err(|err| {
+            warn!(
+                "Received a to-device message with sender_device_keys with invalid signature: {:?}",
+                err
+            );
+            OlmError::EventError(EventError::InvalidSenderDeviceKeys)
+        })?;
+
+        // Check that the Ed25519 key in the sender_device_keys matches the `ed25519`
+        // key in the `keys` field in the event.
+        if sender_device_data.ed25519_key() != Some(event.keys().ed25519) {
+            warn!(
+                    "Received a to-device message with sender_device_keys with incorrect ed25519 key: expected {:?}, got {:?}",
+                    event.keys().ed25519,
+                    sender_device_data.ed25519_key(),
+                );
+            return Err(OlmError::EventError(EventError::InvalidSenderDeviceKeys));
+        }
+
+        // Check that the Curve25519 key in the sender_device_keys matches the key that
+        // was used for the Olm session.
+        if sender_device_data.curve25519_key() != Some(sender_key) {
+            warn!(
+                    "Received a to-device message with sender_device_keys with incorrect curve25519 key: expected {:?}, got {:?}",
+                    sender_key,
+                    sender_device_data.curve25519_key(),
+                );
+            return Err(OlmError::EventError(EventError::InvalidSenderDeviceKeys));
+        }
+
+        Ok(())
+    }
+
     /// Internal use only.
     ///
     /// Cloning should only be done for testing purposes or when we are certain
@@ -1508,6 +1564,34 @@ impl Account {
 impl PartialEq for Account {
     fn eq(&self, other: &Self) -> bool {
         self.identity_keys() == other.identity_keys() && self.shared() == other.shared()
+    }
+}
+
+/// Calculate the shared history flag from the history visibility as defined in
+/// [MSC3061]
+///
+/// The MSC defines that the shared history flag should be set to true when the
+/// history visibility setting is set to `shared` or `world_readable`:
+///
+/// > A room key is flagged as having been used for shared history when it was
+/// > used to encrypt a message while the room's history visibility setting
+/// > was set to world_readable or shared.
+///
+/// In all other cases, even if we encounter a custom history visibility, we
+/// should return false:
+///
+/// > If the client does not have an m.room.history_visibility state event for
+/// > the room, or its value is not understood, the client should treat it as if
+/// > its value is joined for the purposes of determining whether the key is
+/// > used for shared history.
+///
+/// [MSC3061]: https://github.com/matrix-org/matrix-spec-proposals/pull/3061
+pub(crate) fn shared_history_from_history_visibility(
+    history_visibility: &HistoryVisibility,
+) -> bool {
+    match history_visibility {
+        HistoryVisibility::Shared | HistoryVisibility::WorldReadable => true,
+        HistoryVisibility::Invited | HistoryVisibility::Joined | _ => false,
     }
 }
 
@@ -1550,16 +1634,16 @@ mod tests {
     use anyhow::Result;
     use matrix_sdk_test::async_test;
     use ruma::{
-        device_id, user_id, DeviceId, MilliSecondsSinceUnixEpoch, OneTimeKeyAlgorithm,
-        OneTimeKeyId, UserId,
+        device_id, events::room::history_visibility::HistoryVisibility, room_id, user_id, DeviceId,
+        MilliSecondsSinceUnixEpoch, OneTimeKeyAlgorithm, OneTimeKeyId, UserId,
     };
     use serde_json::json;
 
     use super::Account;
     use crate::{
-        olm::SignedJsonObject,
+        olm::{account::shared_history_from_history_visibility, SignedJsonObject},
         types::{DeviceKeys, SignedKey},
-        DeviceData,
+        DeviceData, EncryptionSettings,
     };
 
     fn user_id() -> &'static UserId {
@@ -1754,5 +1838,54 @@ mod tests {
             .expect("The fallback key should pass the signature verification");
 
         Ok(())
+    }
+
+    #[test]
+    fn test_shared_history_flag_from_history_visibility() {
+        assert!(
+            shared_history_from_history_visibility(&HistoryVisibility::WorldReadable),
+            "The world readable visibility should set the shared history flag to true"
+        );
+
+        assert!(
+            shared_history_from_history_visibility(&HistoryVisibility::Shared),
+            "The shared visibility should set the shared history flag to true"
+        );
+
+        assert!(
+            !shared_history_from_history_visibility(&HistoryVisibility::Joined),
+            "The joined visibility should set the shared history flag to false"
+        );
+
+        assert!(
+            !shared_history_from_history_visibility(&HistoryVisibility::Invited),
+            "The invited visibility should set the shared history flag to false"
+        );
+
+        let visibility = HistoryVisibility::from("custom_visibility");
+        assert!(
+            !shared_history_from_history_visibility(&visibility),
+            "A custom visibility should set the shared history flag to false"
+        );
+    }
+
+    #[async_test]
+    async fn test_shared_history_set_when_creating_group_sessions() {
+        let account = Account::new(user_id());
+        let room_id = room_id!("!room:id");
+        let settings = EncryptionSettings {
+            history_visibility: HistoryVisibility::Shared,
+            ..Default::default()
+        };
+
+        let (_, session) = account
+            .create_group_session_pair(room_id, settings, Default::default())
+            .await
+            .expect("We should be able to create a group session pair");
+
+        assert!(
+            session.shared_history(),
+            "The shared history flag should have been set when we created the new session"
+        );
     }
 }

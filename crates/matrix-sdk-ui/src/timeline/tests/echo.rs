@@ -30,7 +30,7 @@ use super::TestTimeline;
 use crate::timeline::{
     controller::TimelineSettings,
     event_item::{EventSendState, RemoteEventOrigin},
-    tests::TestRoomDataProvider,
+    tests::{TestRoomDataProvider, TestTimelineBuilder},
 };
 
 #[async_test]
@@ -64,10 +64,9 @@ async fn test_remote_echo_full_trip() {
     // Scenario 2: The local event has not been sent to the server successfully, it
     // has failed. In this case, there is no event ID.
     {
-        let error =
-            Arc::new(matrix_sdk::Error::SendQueueWedgeError(QueueWedgeError::GenericApiError {
-                msg: "this is a test".to_owned(),
-            }));
+        let error = Arc::new(matrix_sdk::Error::SendQueueWedgeError(Box::new(
+            QueueWedgeError::GenericApiError { msg: "this is a test".to_owned() },
+        )));
         timeline
             .controller
             .update_event_send_state(
@@ -235,10 +234,10 @@ async fn test_date_divider_removed_after_local_echo_disappeared() {
 async fn test_no_read_marker_with_local_echo() {
     let event_id = event_id!("$1");
 
-    let timeline = TestTimeline::with_room_data_provider(
-        TestRoomDataProvider::default().with_fully_read_marker(event_id.to_owned()),
-    )
-    .with_settings(TimelineSettings { track_read_receipts: true, ..Default::default() });
+    let timeline = TestTimelineBuilder::new()
+        .provider(TestRoomDataProvider::default().with_fully_read_marker(event_id.to_owned()))
+        .settings(TimelineSettings { track_read_receipts: true, ..Default::default() })
+        .build();
 
     let f = &timeline.factory;
 

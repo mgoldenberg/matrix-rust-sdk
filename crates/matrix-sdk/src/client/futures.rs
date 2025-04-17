@@ -19,24 +19,14 @@ use std::{fmt::Debug, future::IntoFuture};
 use eyeball::SharedObservable;
 #[cfg(not(target_arch = "wasm32"))]
 use eyeball::Subscriber;
-#[cfg(feature = "experimental-oidc")]
-use mas_oidc_client::{
-    error::{
-        Error as OidcClientError, ErrorBody as OidcErrorBody, HttpError as OidcHttpError,
-        TokenRefreshError, TokenRequestError,
-    },
-    types::errors::ClientErrorCode,
-};
 use matrix_sdk_common::boxed_into_future;
+use oauth2::{basic::BasicErrorResponseType, RequestTokenError};
 use ruma::api::{client::error::ErrorKind, error::FromHttpResponseError, OutgoingRequest};
-#[cfg(feature = "experimental-oidc")]
-use tracing::error;
-use tracing::trace;
+use tracing::{error, trace};
 
 use super::super::Client;
-#[cfg(feature = "experimental-oidc")]
-use crate::authentication::oidc::OidcError;
 use crate::{
+    authentication::oauth::OAuthError,
     config::RequestConfig,
     error::{HttpError, HttpResult},
     RefreshTokenError, TransmissionProgress,
@@ -46,7 +36,6 @@ use crate::{
 #[allow(missing_debug_implementations)]
 pub struct SendRequest<R> {
     pub(crate) client: Client,
-    pub(crate) homeserver_override: Option<String>,
     pub(crate) request: R,
     pub(crate) config: Option<RequestConfig>,
     pub(crate) send_progress: SharedObservable<TransmissionProgress>,
@@ -64,15 +53,6 @@ impl<R> SendRequest<R> {
         send_progress: SharedObservable<TransmissionProgress>,
     ) -> Self {
         self.send_progress = send_progress;
-        self
-    }
-
-    /// Replace this request's target (homeserver) with a custom one.
-    ///
-    /// This is useful at the moment because the current sliding sync
-    /// implementation uses a proxy server.
-    pub fn with_homeserver_override(mut self, homeserver_override: Option<String>) -> Self {
-        self.homeserver_override = homeserver_override;
         self
     }
 
@@ -101,16 +81,11 @@ where
     boxed_into_future!();
 
     fn into_future(self) -> Self::IntoFuture {
-        let Self { client, request, config, send_progress, homeserver_override } = self;
+        let Self { client, request, config, send_progress } = self;
 
         Box::pin(async move {
-            let res = Box::pin(client.send_inner(
-                request.clone(),
-                config,
-                homeserver_override.clone(),
-                send_progress.clone(),
-            ))
-            .await;
+            let res =
+                Box::pin(client.send_inner(request.clone(), config, send_progress.clone())).await;
 
             // An `M_UNKNOWN_TOKEN` error can potentially be fixed with a token refresh.
             if let Err(Some(ErrorKind::UnknownToken { soft_logout })) =
@@ -134,27 +109,21 @@ where
                             client.broadcast_unknown_token(soft_logout);
                         }
 
-                        #[cfg(feature = "experimental-oidc")]
-                        RefreshTokenError::Oidc(oidc_error) => {
-                            match **oidc_error {
-                                OidcError::Oidc(OidcClientError::TokenRefresh(
-                                    TokenRefreshError::Token(TokenRequestError::Http(
-                                        OidcHttpError {
-                                            body:
-                                                Some(OidcErrorBody {
-                                                    error: ClientErrorCode::InvalidGrant,
-                                                    ..
-                                                }),
-                                            ..
-                                        },
-                                    )),
-                                )) => {
-                                    error!("Token refresh: OIDC refresh_token rejected with invalid grant");
+                        RefreshTokenError::OAuth(oauth_error) => {
+                            match &**oauth_error {
+                                OAuthError::RefreshToken(RequestTokenError::ServerResponse(
+                                    error_response,
+                                )) if *error_response.error()
+                                    == BasicErrorResponseType::InvalidGrant =>
+                                {
+                                    error!("Token refresh: OAuth 2.0 refresh_token rejected with invalid grant");
                                     // The refresh was denied, signal to sign out the user.
                                     client.broadcast_unknown_token(soft_logout);
                                 }
                                 _ => {
-                                    trace!("Token refresh: OIDC refresh encountered a problem.");
+                                    trace!(
+                                        "Token refresh: OAuth 2.0 refresh encountered a problem."
+                                    );
                                     // The refresh failed for other reasons, no
                                     // need to sign out.
                                 }
@@ -165,20 +134,14 @@ where
                         _ => {
                             trace!("Token refresh: Token refresh failed.");
                             // This isn't necessarily correct, but matches the behaviour when
-                            // implementing OIDC.
+                            // implementing OAuth 2.0.
                             client.broadcast_unknown_token(soft_logout);
                             return Err(HttpError::RefreshToken(refresh_error));
                         }
                     }
                 } else {
                     trace!("Token refresh: Refresh succeeded, retrying request.");
-                    return Box::pin(client.send_inner(
-                        request,
-                        config,
-                        homeserver_override,
-                        send_progress,
-                    ))
-                    .await;
+                    return Box::pin(client.send_inner(request, config, send_progress)).await;
                 }
             }
 

@@ -1,8 +1,9 @@
 use std::{fs, num::NonZeroUsize, path::Path, sync::Arc, time::Duration};
 
+use async_compat::get_runtime_handle;
 use futures_util::StreamExt;
 use matrix_sdk::{
-    authentication::qrcode::{self, DeviceCodeErrorResponseType, LoginFailureReason},
+    authentication::oauth::qrcode::{self, DeviceCodeErrorResponseType, LoginFailureReason},
     crypto::{
         types::qr_login::{LoginQrCodeDecodeError, QrCodeModeData},
         CollectStrategy, TrustRequirement,
@@ -16,14 +17,13 @@ use matrix_sdk::{
         VersionBuilderError,
     },
     Client as MatrixClient, ClientBuildError as MatrixClientBuildError, HttpError, IdParseError,
-    RumaApiError,
+    RumaApiError, SqliteStoreConfig,
 };
 use ruma::api::error::{DeserializationError, FromHttpResponseError};
 use tracing::{debug, error};
-use url::Url;
 use zeroize::Zeroizing;
 
-use super::{client::Client, RUNTIME};
+use super::client::Client;
 use crate::{
     authentication::OidcConfiguration, client::ClientSessionDelegate, error::ClientError,
     helpers::unwrap_or_clone_arc, task_handle::TaskHandle,
@@ -104,7 +104,7 @@ impl From<qrcode::QRCodeLoginError> for HumanQrLoginError {
                 _ => HumanQrLoginError::Unknown,
             },
 
-            QRCodeLoginError::Oidc(e) => {
+            QRCodeLoginError::OAuth(e) => {
                 if let Some(e) = e.as_request_token_error() {
                     match e {
                         DeviceCodeErrorResponseType::AccessDenied => HumanQrLoginError::Declined,
@@ -153,8 +153,8 @@ pub enum QrLoginProgress {
         /// first digit is a zero.
         check_code_string: String,
     },
-    /// We are waiting for the login and for the OIDC provider to give us an
-    /// access token.
+    /// We are waiting for the login and for the OAuth 2.0 authorization server
+    /// to give us an access token.
     WaitingForToken { user_code: String },
     /// The login has successfully finished.
     Done,
@@ -255,9 +255,13 @@ impl From<ClientError> for ClientBuildError {
 #[derive(Clone, uniffi::Object)]
 pub struct ClientBuilder {
     session_paths: Option<SessionPaths>,
+    session_passphrase: Zeroizing<Option<String>>,
+    session_pool_max_size: Option<usize>,
+    session_cache_size: Option<u32>,
+    session_journal_size_limit: Option<u32>,
+    system_is_memory_constrained: bool,
     username: Option<String>,
     homeserver_cfg: Option<HomeserverConfig>,
-    passphrase: Zeroizing<Option<String>>,
     user_agent: Option<String>,
     sliding_sync_version_builder: SlidingSyncVersionBuilder,
     proxy: Option<String>,
@@ -284,9 +288,13 @@ impl ClientBuilder {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             session_paths: None,
+            session_passphrase: Zeroizing::new(None),
+            session_pool_max_size: None,
+            session_cache_size: None,
+            session_journal_size_limit: None,
+            system_is_memory_constrained: false,
             username: None,
             homeserver_cfg: None,
-            passphrase: Zeroizing::new(None),
             user_agent: None,
             sliding_sync_version_builder: SlidingSyncVersionBuilder::None,
             proxy: None,
@@ -363,6 +371,74 @@ impl ClientBuilder {
         Arc::new(builder)
     }
 
+    /// Set the passphrase for the stores given to
+    /// [`ClientBuilder::session_paths`].
+    pub fn session_passphrase(self: Arc<Self>, passphrase: Option<String>) -> Arc<Self> {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.session_passphrase = Zeroizing::new(passphrase);
+        Arc::new(builder)
+    }
+
+    /// Set the pool max size for the SQLite stores given to
+    /// [`ClientBuilder::session_paths`].
+    ///
+    /// Each store exposes an async pool of connections. This method controls
+    /// the size of the pool. The larger the pool is, the more memory is
+    /// consumed, but also the more the app is reactive because it doesn't need
+    /// to wait on a pool to be available to run queries.
+    ///
+    /// See [`SqliteStoreConfig::pool_max_size`] to learn more.
+    pub fn session_pool_max_size(self: Arc<Self>, pool_max_size: Option<u32>) -> Arc<Self> {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.session_pool_max_size = pool_max_size
+            .map(|size| size.try_into().expect("`pool_max_size` is too large to fit in `usize`"));
+        Arc::new(builder)
+    }
+
+    /// Set the cache size for the SQLite stores given to
+    /// [`ClientBuilder::session_paths`].
+    ///
+    /// Each store exposes a SQLite connection. This method controls the cache
+    /// size, in **bytes (!)**.
+    ///
+    /// The cache represents data SQLite holds in memory at once per open
+    /// database file. The default cache implementation does not allocate the
+    /// full amount of cache memory all at once. Cache memory is allocated
+    /// in smaller chunks on an as-needed basis.
+    ///
+    /// See [`SqliteStoreConfig::cache_size`] to learn more.
+    pub fn session_cache_size(self: Arc<Self>, cache_size: Option<u32>) -> Arc<Self> {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.session_cache_size = cache_size;
+        Arc::new(builder)
+    }
+
+    /// Set the size limit for the SQLite WAL files of stores given to
+    /// [`ClientBuilder::session_paths`].
+    ///
+    /// Each store uses the WAL journal mode. This method controls the size
+    /// limit of the WAL files, in **bytes (!)**.
+    ///
+    /// See [`SqliteStoreConfig::journal_size_limit`] to learn more.
+    pub fn session_journal_size_limit(self: Arc<Self>, limit: Option<u32>) -> Arc<Self> {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.session_journal_size_limit = limit;
+        Arc::new(builder)
+    }
+
+    /// Tell the client that the system is memory constrained, like in a push
+    /// notification process for example.
+    ///
+    /// So far, at the time of writing (2025-04-07), it changes the defaults of
+    /// [`SqliteStoreConfig`], so one might not need to call
+    /// [`ClientBuilder::session_cache_size`] and siblings for example. Please
+    /// check [`SqliteStoreConfig::with_low_memory_config`].
+    pub fn system_is_memory_constrained(self: Arc<Self>) -> Arc<Self> {
+        let mut builder = unwrap_or_clone_arc(self);
+        builder.system_is_memory_constrained = true;
+        Arc::new(builder)
+    }
+
     pub fn username(self: Arc<Self>, username: String) -> Arc<Self> {
         let mut builder = unwrap_or_clone_arc(self);
         builder.username = Some(username);
@@ -384,12 +460,6 @@ impl ClientBuilder {
     pub fn server_name_or_homeserver_url(self: Arc<Self>, server_name_or_url: String) -> Arc<Self> {
         let mut builder = unwrap_or_clone_arc(self);
         builder.homeserver_cfg = Some(HomeserverConfig::ServerNameOrUrl(server_name_or_url));
-        Arc::new(builder)
-    }
-
-    pub fn passphrase(self: Arc<Self>, passphrase: Option<String>) -> Arc<Self> {
-        let mut builder = unwrap_or_clone_arc(self);
-        builder.passphrase = Zeroizing::new(passphrase);
         Arc::new(builder)
     }
 
@@ -521,11 +591,29 @@ impl ClientBuilder {
             fs::create_dir_all(data_path)?;
             fs::create_dir_all(cache_path)?;
 
-            inner_builder = inner_builder.sqlite_store_with_cache_path(
-                data_path,
-                cache_path,
-                builder.passphrase.as_deref(),
-            );
+            let mut sqlite_store_config = if builder.system_is_memory_constrained {
+                SqliteStoreConfig::with_low_memory_config(data_path)
+            } else {
+                SqliteStoreConfig::new(data_path)
+            };
+
+            sqlite_store_config =
+                sqlite_store_config.passphrase(builder.session_passphrase.as_deref());
+
+            if let Some(size) = builder.session_pool_max_size {
+                sqlite_store_config = sqlite_store_config.pool_max_size(size);
+            }
+
+            if let Some(size) = builder.session_cache_size {
+                sqlite_store_config = sqlite_store_config.cache_size(size);
+            }
+
+            if let Some(limit) = builder.session_journal_size_limit {
+                sqlite_store_config = sqlite_store_config.journal_size_limit(limit);
+            }
+
+            inner_builder = inner_builder
+                .sqlite_store_with_config_and_cache_path(sqlite_store_config, Some(cache_path));
         } else {
             debug!("Not using a store path.");
         }
@@ -604,21 +692,9 @@ impl ClientBuilder {
                 inner_builder = inner_builder
                     .sliding_sync_version_builder(MatrixSlidingSyncVersionBuilder::None)
             }
-            SlidingSyncVersionBuilder::Proxy { url } => {
-                inner_builder = inner_builder.sliding_sync_version_builder(
-                    MatrixSlidingSyncVersionBuilder::Proxy {
-                        url: Url::parse(&url)
-                            .map_err(|e| ClientBuildError::Generic { message: e.to_string() })?,
-                    },
-                )
-            }
             SlidingSyncVersionBuilder::Native => {
                 inner_builder = inner_builder
                     .sliding_sync_version_builder(MatrixSlidingSyncVersionBuilder::Native)
-            }
-            SlidingSyncVersionBuilder::DiscoverProxy => {
-                inner_builder = inner_builder
-                    .sliding_sync_version_builder(MatrixSlidingSyncVersionBuilder::DiscoverProxy)
             }
             SlidingSyncVersionBuilder::DiscoverNative => {
                 inner_builder = inner_builder
@@ -629,7 +705,8 @@ impl ClientBuilder {
         if let Some(config) = builder.request_config {
             let mut updated_config = matrix_sdk::config::RequestConfig::default();
             if let Some(retry_limit) = config.retry_limit {
-                updated_config = updated_config.retry_limit(retry_limit);
+                updated_config =
+                    updated_config.retry_limit(retry_limit.try_into().unwrap_or(usize::MAX));
             }
             if let Some(timeout) = config.timeout {
                 updated_config = updated_config.timeout(Duration::from_millis(timeout));
@@ -641,8 +718,9 @@ impl ClientBuilder {
                     ));
                 }
             }
-            if let Some(retry_timeout) = config.retry_timeout {
-                updated_config = updated_config.retry_timeout(Duration::from_millis(retry_timeout));
+            if let Some(max_retry_time) = config.max_retry_time {
+                updated_config =
+                    updated_config.max_retry_time(Duration::from_millis(max_retry_time));
             }
             inner_builder = inner_builder.request_config(updated_config);
         }
@@ -673,8 +751,8 @@ impl ClientBuilder {
     ///
     /// This method will build the client and immediately attempt to log the
     /// client in using the provided [`QrCodeData`] using the login
-    /// mechanism described in [MSC4108]. As such this methods requires OIDC
-    /// support as well as sliding sync support.
+    /// mechanism described in [MSC4108]. As such this methods requires OAuth
+    /// 2.0 support as well as sliding sync support.
     ///
     /// The usage of the progress_listener is required to transfer the
     /// [`CheckCode`] to the existing client.
@@ -700,17 +778,18 @@ impl ClientBuilder {
             }
         })?;
 
-        let client_metadata =
-            oidc_configuration.try_into().map_err(|_| HumanQrLoginError::OidcMetadataInvalid)?;
+        let registration_data = oidc_configuration
+            .registration_data()
+            .map_err(|_| HumanQrLoginError::OidcMetadataInvalid)?;
 
-        let oidc = client.inner.oidc();
-        let login = oidc.login_with_qr_code(&qr_code_data.inner, client_metadata);
+        let oauth = client.inner.oauth();
+        let login = oauth.login_with_qr_code(&qr_code_data.inner, Some(&registration_data));
 
         let mut progress = login.subscribe_to_progress();
 
         // We create this task, which will get cancelled once it's dropped, just in case
         // the progress stream doesn't end.
-        let _progress_task = TaskHandle::new(RUNTIME.spawn(async move {
+        let _progress_task = TaskHandle::new(get_runtime_handle().spawn(async move {
             while let Some(state) = progress.next().await {
                 progress_listener.on_update(state.into());
             }
@@ -722,8 +801,8 @@ impl ClientBuilder {
     }
 }
 
-#[derive(Clone)]
 /// The store paths the client will use when built.
+#[derive(Clone)]
 struct SessionPaths {
     /// The path that the client will use to store its data.
     data_path: String,
@@ -742,14 +821,12 @@ pub struct RequestConfig {
     /// Max number of concurrent requests. No value means no limits.
     max_concurrent_requests: Option<u64>,
     /// Base delay between retries.
-    retry_timeout: Option<u64>,
+    max_retry_time: Option<u64>,
 }
 
 #[derive(Clone, uniffi::Enum)]
 pub enum SlidingSyncVersionBuilder {
     None,
-    Proxy { url: String },
     Native,
-    DiscoverProxy,
     DiscoverNative,
 }

@@ -6,14 +6,46 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - ReleaseDate
 
+## [0.11.0] - 2025-04-11
+
+### Bug Fixes
+
+### Features
+
+- [**breaking**] Optionally allow starting threads with `Timeline::send_reply`.
+  ([4819](https://github.com/matrix-org/matrix-rust-sdk/pull/4819))
+- [**breaking**] Push `RepliedToInfo`, `ReplyContent`, `EnforceThread` and
+  `UnsupportedReplyItem` (becoming `ReplyError`) down into matrix_sdk.
+  [`Timeline::send_reply()`] now takes an event ID rather than a `RepliedToInfo`.
+  `Timeline::replied_to_info_from_event_id` has been made private in `matrix_sdk`.
+  ([4842](https://github.com/matrix-org/matrix-rust-sdk/pull/4842))
+- Allow sending media as (thread) replies. The reply behaviour can be configured
+  through new fields on [`AttachmentConfig`].
+  ([4852](https://github.com/matrix-org/matrix-rust-sdk/pull/4852))
+
+### Refactor
+
+- [**breaking**] Reactions on a given timeline item have been moved from
+  [`EventTimelineItem::reactions()`] to [`TimelineItemContent::reactions()`]; they're thus available
+  from an [`EventTimelineItem`] by calling `.content().reactions()`. They're also returned by
+  ownership (cloned) instead of by reference.
+  ([#4576](https://github.com/matrix-org/matrix-rust-sdk/pull/4576))
+- [**breaking**] The parameters `event_id` and `enforce_thread` on [`Timeline::send_reply()`]
+  have been wrapped in a `reply` struct parameter.
+  ([#4880](https://github.com/matrix-org/matrix-rust-sdk/pull/4880/))
+
+## [0.10.0] - 2025-02-04
+
 ### Bug Fixes
 
 - Don't consider rooms in the banned state to be non-left rooms. This bug was
   introduced due to the introduction of the banned state for rooms, and the
   non-left room filter did not take the new room stat into account.
   ([#4448](https://github.com/matrix-org/matrix-rust-sdk/pull/4448))
+
 - Fix `EventTimelineItem::latest_edit_json()` when it is populated by a live
   edit. ([#4552](https://github.com/matrix-org/matrix-rust-sdk/pull/4552))
+
 - Fix our own explicit read receipt being ignored when loading it from the
   state store, which resulted in our own read receipt being wrong sometimes.
   ([#4600](https://github.com/matrix-org/matrix-rust-sdk/pull/4600))
@@ -35,10 +67,17 @@ All notable changes to this project will be documented in this file.
 
 ### Refactor
 
+- Drastically improve the performance of the `Timeline` when it receives
+  hundreds and hundreds of events (approximately 10 times faster).
+  ([#4601](https://github.com/matrix-org/matrix-rust-sdk/pull/4601),
+  [#4608](https://github.com/matrix-org/matrix-rust-sdk/pull/4608),
+  [#4612](https://github.com/matrix-org/matrix-rust-sdk/pull/4612))
+
 - [**breaking**] `Timeline::paginate_forwards` and `Timeline::paginate_backwards`
   are unified to work on a live or focused timeline.
   `Timeline::live_paginate_*` and `Timeline::focused_paginate_*` have been
   removed ([#4584](https://github.com/matrix-org/matrix-rust-sdk/pull/4584)).
+
 - [**breaking**] `Timeline::subscribe_batched` replaces
   `Timeline::subscribe`. `subscribe` has been removed in
   [#4567](https://github.com/matrix-org/matrix-rust-sdk/pull/4567),

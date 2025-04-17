@@ -20,7 +20,6 @@ use ruma::{
     events::poll::{
         compile_unstable_poll_results,
         start::PollKind,
-        unstable_response::UnstablePollResponseEventContent,
         unstable_start::{
             NewUnstablePollStartEventContent, NewUnstablePollStartEventContentWithoutRelation,
             UnstablePollStartContentBlock,
@@ -88,31 +87,41 @@ impl PollState {
         }
     }
 
+    /// Add a response to a poll.
     pub(crate) fn add_response(
-        &self,
+        &mut self,
+        sender: OwnedUserId,
+        timestamp: MilliSecondsSinceUnixEpoch,
+        answers: Vec<String>,
+    ) {
+        self.response_data.push(ResponseData { sender, timestamp, answers });
+    }
+
+    /// Remove a response from the poll, as identified by its sender and
+    /// timestamp values.
+    pub(crate) fn remove_response(
+        &mut self,
         sender: &UserId,
         timestamp: MilliSecondsSinceUnixEpoch,
-        content: &UnstablePollResponseEventContent,
-    ) -> Self {
-        let mut clone = self.clone();
-        clone.response_data.push(ResponseData {
-            sender: sender.to_owned(),
-            timestamp,
-            answers: content.poll_response.answers.clone(),
-        });
-        clone
+    ) {
+        if let Some(idx) = self
+            .response_data
+            .iter()
+            .position(|resp| resp.sender == sender && resp.timestamp == timestamp)
+        {
+            self.response_data.remove(idx);
+        }
     }
 
     /// Marks the poll as ended.
     ///
-    /// If the poll has already ended, returns `Err(())`.
-    pub(crate) fn end(&self, timestamp: MilliSecondsSinceUnixEpoch) -> Result<Self, ()> {
+    /// Returns false if the poll was already ended, true otherwise.
+    pub(crate) fn end(&mut self, timestamp: MilliSecondsSinceUnixEpoch) -> bool {
         if self.end_event_timestamp.is_none() {
-            let mut clone = self.clone();
-            clone.end_event_timestamp = Some(timestamp);
-            Ok(clone)
+            self.end_event_timestamp = Some(timestamp);
+            true
         } else {
-            Err(())
+            false
         }
     }
 
