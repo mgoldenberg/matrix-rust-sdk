@@ -1632,6 +1632,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-sticky-timeline-start"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures-util",
+ "matrix-sdk",
+ "matrix-sdk-ui",
+ "tokio",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "example-timeline"
 version = "0.1.0"
 dependencies = [
