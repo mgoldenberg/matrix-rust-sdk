@@ -34,9 +34,13 @@ struct Cli {
     #[clap(short, long, action)]
     verbose: bool,
 
-    /// An initial message to send in the room prior to subscribing to timeline
+    /// An initial message to send in the room before subscribing to timeline events
     #[clap(short, long)]
     initial_message: Option<String>,
+
+    /// Number of messages to send after subscribing to timeline events
+    #[clap(short, long, default_value = "3")]
+    num_messages_after_subscribing: usize,
 }
 
 async fn login(cli: Cli) -> Result<Client> {
@@ -66,6 +70,7 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let initial_message = cli.initial_message.clone();
+    let num_messages_after_subscribing = cli.num_messages_after_subscribing;
     let client = login(cli).await?;
 
     // Create a new empty room
@@ -100,18 +105,20 @@ async fn main() -> Result<()> {
     }
 
     let (timeline_items, mut timeline_stream) = timeline.subscribe().await;
-    println!("Initial timeline items: {timeline_items:#?}");
+    println!("Initial timeline items: {timeline_items:?}");
 
     tokio::spawn(async move {
         while let Some(diffs) = timeline_stream.next().await {
-            println!("Received timeline diffs: {diffs:#?}");
+            println!("Received timeline diffs: {diffs:?}");
             let latest_event = timeline.latest_event().await;
-            println!("latest_event={latest_event:?}");
+            println!("Latest event: {latest_event:?}");
         }
     });
 
     tokio::spawn(async move {
-        room.send(RoomMessageEventContent::text_plain("hello")).await.unwrap();
+        for _ in 0..num_messages_after_subscribing {
+            room.send(RoomMessageEventContent::text_plain("hello")).await.unwrap();
+        }
     });
 
     // Sync forever
