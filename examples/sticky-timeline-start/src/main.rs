@@ -118,6 +118,7 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         for _ in 0..num_messages_after_subscribing {
             room.send(RoomMessageEventContent::text_plain("hello")).await.unwrap();
+            tokio::task::yield_now().await;
         }
     });
 
