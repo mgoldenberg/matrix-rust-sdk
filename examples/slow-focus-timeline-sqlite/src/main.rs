@@ -14,38 +14,44 @@ use url::Url;
 #[derive(Parser, Debug)]
 struct Cli {
     /// The homeserver to connect to.
-    #[clap(value_parser)]
+    #[clap(long)]
     homeserver: Url,
 
     /// The user name that should be used for the login.
-    #[clap(value_parser)]
-    user_name: String,
+    #[clap(long)]
+    username: String,
 
     /// The password that should be used for the login.
-    #[clap(value_parser)]
+    #[clap(long)]
     password: String,
 
     /// Set the proxy that should be used for the connection.
-    #[clap(short, long)]
+    #[clap(long)]
     proxy: Option<Url>,
 
     /// Enable verbose logging output.
-    #[clap(short, long, action)]
+    #[clap(long, action)]
     verbose: bool,
 
     /// The room id that we should listen for the,
-    #[clap(value_parser)]
+    #[clap(long)]
     room_id: OwnedRoomId,
 
     #[clap(long)]
     event_id: OwnedEventId,
 
-    #[clap(long, default_value = "0")]
+    #[clap(long, default_value = "20")]
     num_context_events: u16,
 
     /// Whether to use a SQLite store or an in-memory store
-    #[clap(short, long, action)]
-    sqlite: bool,
+    #[clap(long, action)]
+    sqlite_store: bool,
+
+    #[clap(long, default_value = "db.sqlite")]
+    sqlite_store_path: String,
+
+    #[clap(long)]
+    device_id: Option<String>,
 }
 
 async fn login(cli: Cli) -> Result<Client> {
@@ -58,19 +64,23 @@ async fn login(cli: Cli) -> Result<Client> {
         builder = builder.proxy(proxy);
     }
 
-    if cli.sqlite {
-        const PATH: &str = "db.sqlite";
-        println!("Using SQLite store, path: {PATH}");
-        builder = builder.sqlite_store(PATH, None);
+    if cli.sqlite_store {
+        println!("Using SQLite store, path: {}", cli.sqlite_store_path);
+        builder = builder.sqlite_store(cli.sqlite_store_path, None);
     }
 
     let client = builder.build().await?;
 
-    client
+    let mut login_builder = client
         .matrix_auth()
-        .login_username(&cli.user_name, &cli.password)
-        .initial_device_display_name("rust-sdk")
-        .await?;
+        .login_username(&cli.username, &cli.password)
+        .initial_device_display_name("rust-sdk");
+
+    if let Some(device_id) = cli.device_id {
+        login_builder = login_builder.device_id(device_id.as_str());
+    }
+
+    login_builder.await?;
 
     Ok(client)
 }
@@ -95,26 +105,26 @@ async fn main() -> Result<()> {
     // Get the timeline stream and listen to it.
     let room = client.get_room(&room_id).unwrap();
 
+    println!("Constructing live timeline... ");
     let timeline = room.timeline().await?;
     while !timeline.paginate_backwards(100).await? {
         println!("Paginating backwards...");
     }
-
+    print!("Listening for timeline events... ");
     let (timeline_items, mut timeline_stream) = timeline.subscribe().await;
-
-    println!("Initial timeline items: {}", timeline_items.len());
+    println!("Initial timeline contains ({}) events", timeline_items.len());
     tokio::spawn(async move {
         while let Some(diffs) = timeline_stream.next().await {
             println!("Received timeline diffs: {diffs:?}");
         }
     });
 
-    println!("Constructing second timeline...");
+    println!("Constructing event timeline... ");
     let focus = TimelineFocus::Event { target: event_id, num_context_events };
     let now = Instant::now();
     let _ = room.timeline_builder().with_focus(focus.clone()).build().await?;
     let elapsed = now.elapsed();
-    println!("Timeline (focus={focus:?}) took {elapsed:?} to construct");
+    println!("Event timeline (focus={focus:?}) took {elapsed:?} to construct");
 
     // Sync forever
     client.sync(sync_settings).await?;
