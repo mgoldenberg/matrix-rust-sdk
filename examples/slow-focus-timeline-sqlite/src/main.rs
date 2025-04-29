@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::Parser;
@@ -114,17 +114,20 @@ async fn main() -> Result<()> {
     let (timeline_items, mut timeline_stream) = timeline.subscribe().await;
     println!("Initial timeline contains ({}) events", timeline_items.len());
     tokio::spawn(async move {
-        while let Some(diffs) = timeline_stream.next().await {
-            println!("Received timeline diffs: {diffs:?}");
+        while let Some(_) = timeline_stream.next().await {
+            println!("Received timeline diff!");
         }
     });
 
-    println!("Constructing event timeline... ");
-    let focus = TimelineFocus::Event { target: event_id, num_context_events };
-    let now = Instant::now();
-    let _ = room.timeline_builder().with_focus(focus.clone()).build().await?;
-    let elapsed = now.elapsed();
-    println!("Event timeline (focus={focus:?}) took {elapsed:?} to construct");
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        println!("Constructing event timeline... ");
+        let focus = TimelineFocus::Event { target: event_id, num_context_events };
+        let now = Instant::now();
+        let _ = room.timeline_builder().with_focus(focus.clone()).build().await.unwrap();
+        let elapsed = now.elapsed();
+        println!("Event timeline (focus={focus:?}) took {elapsed:?} to construct");
+    });
 
     // Sync forever
     client.sync(sync_settings).await?;
