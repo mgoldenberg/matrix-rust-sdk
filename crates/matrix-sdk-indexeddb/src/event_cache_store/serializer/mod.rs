@@ -24,8 +24,10 @@ use crate::{
     event_cache_store::{
         keys,
         serializer::types::{IndexedEvent, ValueWithId},
-        EventForCache, GenericEventForCache, InBandEventForCache, OutOfBandEventForCache,
-        PositionForCache,
+        types::{
+            EventForCache, GenericEventForCache, InBandEventForCache, OutOfBandEventForCache,
+            PositionForCache,
+        },
     },
     serializer::IndexeddbSerializer,
     IndexeddbEventCacheStoreError,
