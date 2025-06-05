@@ -14,6 +14,8 @@
 
 mod builder;
 mod migrations;
+#[allow(unused)]
+mod serializer;
 
 use std::future::IntoFuture;
 
