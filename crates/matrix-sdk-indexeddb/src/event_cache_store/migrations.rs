@@ -45,9 +45,11 @@ async fn setup_db(db: IdbDatabase, version: u32) -> Result<IdbDatabase, DomExcep
 
                 let mut object_store_params = IdbObjectStoreParameters::new();
                 object_store_params.key_path(Some(&IdbKeyPath::from("id")));
-                events
+                let linked_chunks_object_store = events
                     .db()
                     .create_object_store_with_params(keys::LINKED_CHUNKS, &object_store_params)?;
+                linked_chunks_object_store
+                    .create_index(keys::LINKED_CHUNK_NEXTS, &IdbKeyPath::from("next"))?;
 
                 let mut event_positions_parameters = IdbIndexParameters::new();
                 event_positions_parameters.unique(true);

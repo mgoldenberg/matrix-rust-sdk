@@ -59,6 +59,7 @@ mod keys {
     pub const EVENT_RELATED_EVENTS: &str = "event_related_events";
     pub const EVENT_RELATION_TYPES: &str = "event_relation_types";
     pub const LINKED_CHUNKS: &str = "linked_chunks";
+    pub const LINKED_CHUNK_NEXTS: &str = "linked_chunk_nexts";
     pub const GAPS: &str = "gaps";
 }
 
