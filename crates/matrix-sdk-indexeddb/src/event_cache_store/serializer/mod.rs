@@ -24,10 +24,7 @@ use crate::{
     event_cache_store::{
         keys,
         serializer::types::{IndexedEvent, ValueWithId},
-        types::{
-            EventForCache, GenericEventForCache, InBandEventForCache, OutOfBandEventForCache,
-            PositionForCache,
-        },
+        types::{Event, GenericEvent, InBandEvent, OutOfBandEvent, Position},
     },
     serializer::IndexeddbSerializer,
     IndexeddbEventCacheStoreError,
@@ -124,7 +121,7 @@ impl IndexeddbEventCacheStoreSerializer {
         Ok(deserialized)
     }
 
-    pub fn encode_event_position_key(&self, room_id: &str, position: &PositionForCache) -> String {
+    pub fn encode_event_position_key(&self, room_id: &str, position: &Position) -> String {
         self.encode_key(vec![
             (keys::ROOMS, room_id, true),
             (keys::LINKED_CHUNKS, &position.chunk_id.to_string(), false),
@@ -148,8 +145,7 @@ impl IndexeddbEventCacheStoreSerializer {
         room_id: &str,
         chunk_id: u64,
     ) -> IdbKeyRange {
-        let lower =
-            self.encode_event_position_key(room_id, &PositionForCache { chunk_id, index: 0 });
+        let lower = self.encode_event_position_key(room_id, &Position { chunk_id, index: 0 });
         let upper = self.encode_upper_event_position_key_for_chunk(room_id, chunk_id);
         IdbKeyRange::bound(&lower.into(), &upper.into()).expect("construct key range")
     }
@@ -157,7 +153,7 @@ impl IndexeddbEventCacheStoreSerializer {
     pub fn encode_event_position_range_for_chunk_from(
         &self,
         room_id: &str,
-        position: &PositionForCache,
+        position: &Position,
     ) -> IdbKeyRange {
         let lower = self.encode_event_position_key(room_id, position);
         let upper = self.encode_upper_event_position_key_for_chunk(room_id, position.chunk_id);
@@ -201,7 +197,7 @@ impl IndexeddbEventCacheStoreSerializer {
 
     pub fn serialize_in_band_event(
         &self,
-        event: &InBandEventForCache,
+        event: &InBandEvent,
     ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
         let event_id = event.content.event_id().ok_or(IndexeddbEventCacheStoreError::NoEventId)?;
         let id = self.encode_event_id_key(&event.room_id, &event_id);
@@ -223,7 +219,7 @@ impl IndexeddbEventCacheStoreSerializer {
 
     pub fn serialize_out_of_band_event(
         &self,
-        event: &OutOfBandEventForCache,
+        event: &OutOfBandEvent,
     ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
         let event_id = event.content.event_id().ok_or(IndexeddbEventCacheStoreError::NoEventId)?;
         let id = self.encode_event_id_key(&event.room_id, &event_id);
@@ -242,13 +238,10 @@ impl IndexeddbEventCacheStoreSerializer {
         })?)
     }
 
-    pub fn serialize_event(
-        &self,
-        event: &EventForCache,
-    ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
+    pub fn serialize_event(&self, event: &Event) -> Result<JsValue, IndexeddbEventCacheStoreError> {
         match event {
-            EventForCache::InBand(i) => self.serialize_in_band_event(i),
-            EventForCache::OutOfBand(o) => self.serialize_out_of_band_event(o),
+            Event::InBand(i) => self.serialize_in_band_event(i),
+            Event::OutOfBand(o) => self.serialize_out_of_band_event(o),
         }
     }
 
@@ -264,24 +257,22 @@ impl IndexeddbEventCacheStoreSerializer {
     pub fn deserialize_generic_event<P: DeserializeOwned>(
         &self,
         value: JsValue,
-    ) -> Result<GenericEventForCache<P>, IndexeddbEventCacheStoreError> {
+    ) -> Result<GenericEvent<P>, IndexeddbEventCacheStoreError> {
         let indexed: IndexedEvent = value.into_serde()?;
-        self.inner
-            .maybe_decrypt_value::<GenericEventForCache<P>>(indexed.content)
-            .map_err(Into::into)
+        self.inner.maybe_decrypt_value::<GenericEvent<P>>(indexed.content).map_err(Into::into)
     }
 
     pub fn deserialize_in_band_event(
         &self,
         value: JsValue,
-    ) -> Result<InBandEventForCache, IndexeddbEventCacheStoreError> {
+    ) -> Result<InBandEvent, IndexeddbEventCacheStoreError> {
         self.deserialize_generic_event(value)
     }
 
     pub fn deserialize_event(
         &self,
         value: JsValue,
-    ) -> Result<EventForCache, IndexeddbEventCacheStoreError> {
+    ) -> Result<Event, IndexeddbEventCacheStoreError> {
         let indexed: IndexedEvent = value.into_serde()?;
         self.inner.maybe_decrypt_value(indexed.content).map_err(Into::into)
     }

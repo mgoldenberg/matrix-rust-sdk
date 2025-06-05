@@ -20,7 +20,7 @@ use ruma::OwnedEventId;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ChunkForCache {
+pub struct Chunk {
     pub id: String,
     pub raw_id: u64,
     pub previous: Option<String>,
@@ -30,7 +30,7 @@ pub struct ChunkForCache {
     pub type_str: String,
 }
 
-impl ChunkForCache {
+impl Chunk {
     /// Used to set field `type_str` to represent a chunk that contains events
     pub const CHUNK_TYPE_EVENT_TYPE_STRING: &str = "E";
     /// Used to set field `type_str` to represent a chunk that is a gap
@@ -39,62 +39,62 @@ impl ChunkForCache {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
-pub enum EventForCache {
-    InBand(InBandEventForCache),
-    OutOfBand(OutOfBandEventForCache),
+pub enum Event {
+    InBand(InBandEvent),
+    OutOfBand(OutOfBandEvent),
 }
 
-impl EventForCache {
+impl Event {
     pub fn take_content(self) -> TimelineEvent {
         match self {
-            EventForCache::InBand(i) => i.content,
-            EventForCache::OutOfBand(o) => o.content,
+            Event::InBand(i) => i.content,
+            Event::OutOfBand(o) => o.content,
         }
     }
 
     pub fn replace_content(&mut self, content: TimelineEvent) -> TimelineEvent {
         match self {
-            EventForCache::InBand(i) => std::mem::replace(&mut i.content, content),
-            EventForCache::OutOfBand(o) => std::mem::replace(&mut o.content, content),
+            Event::InBand(i) => std::mem::replace(&mut i.content, content),
+            Event::OutOfBand(o) => std::mem::replace(&mut o.content, content),
         }
     }
 }
 
-pub type InBandEventForCache = GenericEventForCache<PositionForCache>;
-pub type OutOfBandEventForCache = GenericEventForCache<()>;
+pub type InBandEvent = GenericEvent<Position>;
+pub type OutOfBandEvent = GenericEvent<()>;
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct GenericEventForCache<P> {
+pub struct GenericEvent<P> {
     pub content: TimelineEvent,
     pub room_id: String,
     pub position: P,
 }
 
-impl<P> GenericEventForCache<P> {
+impl<P> GenericEvent<P> {
     pub fn relation(&self) -> Option<(OwnedEventId, String)> {
         extract_event_relation(self.content.raw())
     }
 }
 
 #[derive(Debug, Default, Copy, Clone, Serialize, Deserialize)]
-pub struct PositionForCache {
+pub struct Position {
     pub chunk_id: u64,
     pub index: usize,
 }
 
-impl From<PositionForCache> for matrix_sdk_base::linked_chunk::Position {
-    fn from(value: PositionForCache) -> Self {
+impl From<Position> for matrix_sdk_base::linked_chunk::Position {
+    fn from(value: Position) -> Self {
         Self::new(ChunkIdentifier::new(value.chunk_id), value.index)
     }
 }
 
-impl From<matrix_sdk_base::linked_chunk::Position> for PositionForCache {
+impl From<matrix_sdk_base::linked_chunk::Position> for Position {
     fn from(value: matrix_sdk_base::linked_chunk::Position) -> Self {
         Self { chunk_id: value.chunk_identifier().index(), index: value.index() }
     }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct GapForCache {
+pub struct Gap {
     pub prev_token: String,
 }
