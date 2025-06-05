@@ -4,7 +4,10 @@ use matrix_sdk_base::event_cache::store::MemoryStore;
 use matrix_sdk_store_encryption::StoreCipher;
 
 use crate::{
-    event_cache_store::{migrations::open_and_upgrade_db, IndexeddbEventCacheStore, Result},
+    event_cache_store::{
+        migrations::open_and_upgrade_db, serializer::IndexeddbEventCacheStoreSerializer,
+        IndexeddbEventCacheStore, Result,
+    },
     serializer::IndexeddbSerializer,
 };
 
@@ -33,7 +36,9 @@ impl IndexeddbEventCacheStoreBuilder {
         let name = self.name.unwrap_or_else(|| "event_cache".to_owned());
         let store = IndexeddbEventCacheStore {
             inner: open_and_upgrade_db(&name).await?,
-            serializer: IndexeddbSerializer::new(self.store_cipher),
+            serializer: IndexeddbEventCacheStoreSerializer::new(IndexeddbSerializer::new(
+                self.store_cipher,
+            )),
             media_store: MemoryStore::new(),
         };
         Ok(store)

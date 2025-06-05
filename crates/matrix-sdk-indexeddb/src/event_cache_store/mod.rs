@@ -14,14 +14,12 @@
 
 mod builder;
 mod migrations;
-#[allow(unused)]
 mod serializer;
 
 use std::future::IntoFuture;
 
 use async_trait::async_trait;
 pub use builder::IndexeddbEventCacheStoreBuilder;
-use gloo_utils::format::JsValueSerdeExt;
 use indexed_db_futures::{IdbDatabase, IdbQuerySource};
 use matrix_sdk_base::{
     deserialized_responses::TimelineEvent,
@@ -41,12 +39,15 @@ use ruma::{
     events::relation::RelationType, EventId, MilliSecondsSinceUnixEpoch, MxcUri, OwnedEventId,
     RoomId,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use tracing::{error, trace};
 use wasm_bindgen::JsValue;
 use web_sys::{IdbKeyRange, IdbTransactionMode};
 
-use crate::serializer::{IndexeddbSerializer, IndexeddbSerializerError, MaybeEncrypted};
+use crate::{
+    event_cache_store::serializer::IndexeddbEventCacheStoreSerializer,
+    serializer::IndexeddbSerializerError,
+};
 
 mod keys {
     pub const CORE: &str = "core";
@@ -125,20 +126,8 @@ type Result<T, E = IndexeddbEventCacheStoreError> = std::result::Result<T, E>;
 #[derive(Debug)]
 pub struct IndexeddbEventCacheStore {
     inner: IdbDatabase,
-    serializer: IndexeddbSerializer,
+    serializer: IndexeddbEventCacheStoreSerializer,
     media_store: MemoryStore,
-}
-
-/// A type that wraps a (de)serialized value `value` and associates it
-/// with an identifier, `id`.
-///
-/// This is useful for (de)serializing values to/from an object store
-/// and ensuring that they are well-formed, as each of the object stores
-/// uses `id` as its key path.
-#[derive(Debug, Deserialize, Serialize)]
-struct ValueWithId {
-    id: String,
-    value: MaybeEncrypted,
 }
 
 impl IndexeddbEventCacheStore {
@@ -148,221 +137,6 @@ impl IndexeddbEventCacheStore {
 
     pub fn builder() -> IndexeddbEventCacheStoreBuilder {
         IndexeddbEventCacheStoreBuilder::new()
-    }
-
-    /// Encodes each tuple in `parts` as a key and then joins them with
-    /// `Self::KEY_SEPARATOR`.
-    ///
-    /// Each tuple is composed of three fields.
-    ///
-    /// - `&str` - name of an object store
-    /// - `&str` - key of an object in the object store
-    /// - `bool` - whether to encrypt the fields above in the final key
-    ///
-    /// Selective encryption is employed to maintain ordering, so that range
-    /// queries are possible.
-    pub fn encode_key(&self, parts: Vec<(&str, &str, bool)>) -> String {
-        let mut end_key = String::new();
-        for (i, (table_name, key, should_encrypt)) in parts.into_iter().enumerate() {
-            if i > 0 {
-                end_key.push(Self::KEY_SEPARATOR);
-            }
-            let encoded_key = if should_encrypt {
-                self.serializer.encode_key_as_string(table_name, key)
-            } else {
-                key.to_owned()
-            };
-            end_key.push_str(&encoded_key);
-        }
-        end_key
-    }
-
-    /// Same as `Self::encode_key`, but appends `Self::KEY_SEPARATOR` and
-    /// `Self::KEY_UPPER_CHARACTER`.
-    ///
-    /// This is useful when constructing range queries, as it provides an upper
-    /// key for a collection of `parts`.
-    pub fn encode_upper_key(&self, parts: Vec<(&str, &str, bool)>) -> String {
-        let mut key = self.encode_key(parts);
-        key.push(Self::KEY_SEPARATOR);
-        key.push(Self::KEY_UPPER_CHARACTER);
-        key
-    }
-
-    /// Serializes `value` and wraps it with a `ValueWithId` using `id`.
-    ///
-    /// This helps to ensure that values are well-formed before putting them
-    /// into an object store, as each of the object stores uses `id` as its key
-    /// path.
-    pub fn serialize_value_with_id(
-        &self,
-        id: &str,
-        value: &impl Serialize,
-    ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
-        let serialized = self.serializer.maybe_encrypt_value(value)?;
-        let res_obj = ValueWithId { id: id.to_owned(), value: serialized };
-        Ok(serde_wasm_bindgen::to_value(&res_obj)?)
-    }
-
-    /// Deserializes a `value` as a `ValueWithId` and then returns the result of
-    /// deserializing the inner `value`.
-    ///
-    /// The corresponding serialization function, `serialize_value_with_id`
-    /// helps to ensure that values are well-formed before putting them into
-    /// an object store, as each of the object stores uses `id` as its key
-    /// path.
-    pub fn deserialize_value_with_id<T: DeserializeOwned>(
-        &self,
-        value: JsValue,
-    ) -> Result<T, IndexeddbEventCacheStoreError> {
-        let obj: ValueWithId = value.into_serde()?;
-        let deserialized: T = self.serializer.maybe_decrypt_value(obj.value)?;
-        Ok(deserialized)
-    }
-
-    fn encode_event_position_key(&self, room_id: &str, position: &PositionForCache) -> String {
-        self.encode_key(vec![
-            (keys::ROOMS, room_id, true),
-            (keys::LINKED_CHUNKS, &position.chunk_id.to_string(), false),
-            (keys::EVENTS, &position.index.to_string(), false),
-        ])
-    }
-
-    fn encode_upper_event_position_key_for_chunk(&self, room_id: &str, chunk_id: u64) -> String {
-        self.encode_upper_key(vec![
-            (keys::ROOMS, room_id, true),
-            (keys::LINKED_CHUNKS, &chunk_id.to_string(), false),
-        ])
-    }
-
-    fn encode_event_position_range_for_chunk(&self, room_id: &str, chunk_id: u64) -> IdbKeyRange {
-        let lower =
-            self.encode_event_position_key(room_id, &PositionForCache { chunk_id, index: 0 });
-        let upper = self.encode_upper_event_position_key_for_chunk(room_id, chunk_id);
-        IdbKeyRange::bound(&lower.into(), &upper.into()).expect("construct key range")
-    }
-
-    fn encode_event_position_range_for_chunk_from(
-        &self,
-        room_id: &str,
-        position: &PositionForCache,
-    ) -> IdbKeyRange {
-        let lower = self.encode_event_position_key(room_id, position);
-        let upper = self.encode_upper_event_position_key_for_chunk(room_id, position.chunk_id);
-        IdbKeyRange::bound(&lower.into(), &upper.into()).expect("construct key range")
-    }
-
-    fn encode_event_id_key(&self, room_id: &str, event_id: &EventId) -> String {
-        self.encode_key(vec![(keys::ROOMS, room_id, true), (keys::EVENTS, event_id.as_ref(), true)])
-    }
-
-    fn encode_event_relation_key(
-        &self,
-        room_id: &str,
-        related_event: &EventId,
-        relation_type: &RelationType,
-    ) -> String {
-        self.encode_key(vec![
-            (keys::ROOMS, room_id, true),
-            (keys::EVENT_RELATED_EVENTS, related_event.as_ref(), true),
-            (keys::EVENT_RELATION_TYPES, relation_type.as_ref(), true),
-        ])
-    }
-
-    fn encode_event_relation_range_for_related_event(
-        &self,
-        room_id: &str,
-        related_event: &EventId,
-    ) -> IdbKeyRange {
-        let lower = self.encode_key(vec![
-            (keys::ROOMS, room_id, true),
-            (keys::EVENT_RELATED_EVENTS, related_event.as_ref(), true),
-            (keys::EVENT_RELATION_TYPES, &String::from(Self::KEY_LOWER_CHARACTER), false),
-        ]);
-        let upper = self.encode_key(vec![
-            (keys::ROOMS, room_id, true),
-            (keys::EVENT_RELATED_EVENTS, related_event.as_ref(), true),
-            (keys::EVENT_RELATION_TYPES, &String::from(Self::KEY_UPPER_CHARACTER), false),
-        ]);
-        IdbKeyRange::bound(&lower.into(), &upper.into()).expect("construct key range")
-    }
-
-    fn serialize_in_band_event(
-        &self,
-        event: &InBandEventForCache,
-    ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
-        let event_id = event.content.event_id().ok_or(IndexeddbEventCacheStoreError::NoEventId)?;
-        let id = self.encode_event_id_key(&event.room_id, &event_id);
-        let position = self.encode_event_position_key(&event.room_id, &event.position);
-        let relation = event.relation().map(|(related_event, relation_type)| {
-            self.encode_event_relation_key(
-                &event.room_id,
-                &related_event,
-                &RelationType::from(relation_type),
-            )
-        });
-        Ok(serde_wasm_bindgen::to_value(&IndexedEvent {
-            id,
-            position: Some(position),
-            relation,
-            content: self.serializer.maybe_encrypt_value(event)?,
-        })?)
-    }
-
-    fn serialize_out_of_band_event(
-        &self,
-        event: &OutOfBandEventForCache,
-    ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
-        let event_id = event.content.event_id().ok_or(IndexeddbEventCacheStoreError::NoEventId)?;
-        let id = self.encode_event_id_key(&event.room_id, &event_id);
-        let relation = event.relation().map(|(related_event, relation_type)| {
-            self.encode_event_relation_key(
-                &event.room_id,
-                &related_event,
-                &RelationType::from(relation_type),
-            )
-        });
-        Ok(serde_wasm_bindgen::to_value(&IndexedEvent {
-            id,
-            position: None,
-            relation,
-            content: self.serializer.maybe_encrypt_value(event)?,
-        })?)
-    }
-
-    fn serialize_event(
-        &self,
-        event: &EventForCache,
-    ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
-        match event {
-            EventForCache::InBand(i) => self.serialize_in_band_event(i),
-            EventForCache::OutOfBand(o) => self.serialize_out_of_band_event(o),
-        }
-    }
-
-    fn deserialize_generic_event<P: DeserializeOwned>(
-        &self,
-        value: JsValue,
-    ) -> Result<GenericEventForCache<P>, IndexeddbEventCacheStoreError> {
-        let indexed: IndexedEvent = value.into_serde()?;
-        self.serializer
-            .maybe_decrypt_value::<GenericEventForCache<P>>(indexed.content)
-            .map_err(Into::into)
-    }
-
-    fn deserialize_in_band_event(
-        &self,
-        value: JsValue,
-    ) -> Result<InBandEventForCache, IndexeddbEventCacheStoreError> {
-        self.deserialize_generic_event(value)
-    }
-
-    fn deserialize_event(
-        &self,
-        value: JsValue,
-    ) -> Result<EventForCache, IndexeddbEventCacheStoreError> {
-        let indexed: IndexedEvent = value.into_serde()?;
-        self.serializer.maybe_decrypt_value(indexed.content).map_err(Into::into)
     }
 
     async fn get_all_events_by_position<K: wasm_bindgen::JsCast>(
@@ -390,7 +164,7 @@ impl IndexeddbEventCacheStore {
             .get_all_with_key(key)?
             .await?;
         for value in values {
-            events.push(self.deserialize_event(value)?);
+            events.push(self.serializer.deserialize_event(value)?);
         }
         Ok(events)
     }
@@ -400,7 +174,7 @@ impl IndexeddbEventCacheStore {
         room_id: &RoomId,
         event_id: &EventId,
     ) -> Result<Option<EventForCache>, IndexeddbEventCacheStoreError> {
-        let key = self.encode_event_id_key(room_id.as_ref(), event_id);
+        let key = self.serializer.encode_event_id_key(room_id.as_ref(), event_id);
         let mut events = self.get_all_events_by_id(&JsValue::from(key)).await?;
         if events.len() > 1 {
             return Err(IndexeddbEventCacheStoreError::DuplicateEventId);
@@ -421,7 +195,7 @@ impl IndexeddbEventCacheStore {
             .get_all_with_key(key)?
             .await?;
         for value in values {
-            events.push(self.deserialize_event(value)?);
+            events.push(self.serializer.deserialize_event(value)?);
         }
         Ok(events)
     }
@@ -432,7 +206,11 @@ impl IndexeddbEventCacheStore {
         related_event: &EventId,
         relation_type: &RelationType,
     ) -> Result<Vec<EventForCache>, IndexeddbEventCacheStoreError> {
-        let key = self.encode_event_relation_key(room_id.as_ref(), related_event, relation_type);
+        let key = self.serializer.encode_event_relation_key(
+            room_id.as_ref(),
+            related_event,
+            relation_type,
+        );
         self.get_all_events_by_relation_range(&JsValue::from(key)).await
     }
 
@@ -441,8 +219,9 @@ impl IndexeddbEventCacheStore {
         room_id: &RoomId,
         related_event: &EventId,
     ) -> Result<Vec<EventForCache>, IndexeddbEventCacheStoreError> {
-        let range =
-            self.encode_event_relation_range_for_related_event(room_id.as_ref(), related_event);
+        let range = self
+            .serializer
+            .encode_event_relation_range_for_related_event(room_id.as_ref(), related_event);
         self.get_all_events_by_relation_range(&range).await
     }
 
@@ -451,11 +230,12 @@ impl IndexeddbEventCacheStore {
         room_id: &RoomId,
         chunk_id: u64,
     ) -> Result<Vec<InBandEventForCache>, IndexeddbEventCacheStoreError> {
-        let range = self.encode_event_position_range_for_chunk(room_id.as_ref(), chunk_id);
+        let range =
+            self.serializer.encode_event_position_range_for_chunk(room_id.as_ref(), chunk_id);
         let values = self.get_all_events_by_position(&range).await?;
         let mut events = Vec::new();
         for event in values {
-            let event: InBandEventForCache = self.deserialize_in_band_event(event)?;
+            let event: InBandEventForCache = self.serializer.deserialize_in_band_event(event)?;
             events.push(event);
         }
         Ok(events)
@@ -555,14 +335,6 @@ impl From<Position> for PositionForCache {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct IndexedEvent {
-    id: String,
-    position: Option<String>,
-    relation: Option<String>,
-    content: MaybeEncrypted,
-}
-
 // Small hack to have the following macro invocation act as the appropriate
 // trait impl block on wasm, but still be compiled on non-wasm as a regular
 // impl block otherwise.
@@ -656,17 +428,17 @@ impl_event_cache_store! {
             match update {
                 Update::NewItemsChunk { previous, new, next } => {
                     let previous_id = previous.map(|n| {
-                        self.encode_key(vec![
+                        self.serializer.encode_key(vec![
                             (keys::ROOMS, room_id.as_ref(), true),
                             (keys::LINKED_CHUNKS, &n.index().to_string(), false),
                         ])
                     });
-                    let id = self.encode_key(vec![
+                    let id = self.serializer.encode_key(vec![
                         (keys::ROOMS, room_id.as_ref(), true),
                         (keys::LINKED_CHUNKS, &new.index().to_string(), false),
                     ]);
                     let next_id = next.map(|n| {
-                        self.encode_key(vec![
+                        self.serializer.encode_key(vec![
                             (keys::ROOMS, room_id.as_ref(), true),
                             (keys::LINKED_CHUNKS, &n.index().to_string(), false),
                         ])
@@ -684,7 +456,7 @@ impl_event_cache_store! {
                         type_str: ChunkForCache::CHUNK_TYPE_EVENT_TYPE_STRING.to_owned(),
                     };
 
-                    let chunk_serialized = self.serialize_value_with_id(&id, &chunk)?;
+                    let chunk_serialized = self.serializer.serialize_value_with_id(&id, &chunk)?;
 
                     linked_chunks.add_val_owned(chunk_serialized)?;
 
@@ -693,7 +465,7 @@ impl_event_cache_store! {
 
                         if let Some(previous) = previous {
                             let previous: ChunkForCache =
-                                self.deserialize_value_with_id(previous)?;
+                                self.serializer.deserialize_value_with_id(previous)?;
 
                             let previous = ChunkForCache {
                                 id: previous.id,
@@ -705,7 +477,7 @@ impl_event_cache_store! {
                                 type_str: previous.type_str,
                             };
 
-                            let previous = self.serialize_value_with_id(&previous_id, &previous)?;
+                            let previous = self.serializer.serialize_value_with_id(&previous_id, &previous)?;
 
                             linked_chunks.put_val_owned(previous)?;
                         }
@@ -714,7 +486,7 @@ impl_event_cache_store! {
                     if let Some(next_id) = next_id {
                         let next = linked_chunks.get_owned(&next_id)?.await?;
                         if let Some(next) = next {
-                            let next: ChunkForCache = self.deserialize_value_with_id(next)?;
+                            let next: ChunkForCache = self.serializer.deserialize_value_with_id(next)?;
 
                             let next = ChunkForCache {
                                 id: next.id,
@@ -726,7 +498,7 @@ impl_event_cache_store! {
                                 type_str: next.type_str,
                             };
 
-                            let next = self.serialize_value_with_id(&next_id, &next)?;
+                            let next = self.serializer.serialize_value_with_id(&next_id, &next)?;
 
                             linked_chunks.put_val_owned(next)?;
                         }
@@ -734,17 +506,17 @@ impl_event_cache_store! {
                 }
                 Update::NewGapChunk { previous, new, next, gap } => {
                     let previous_id = previous.map(|n| {
-                        self.encode_key(vec![
+                        self.serializer.encode_key(vec![
                             (keys::ROOMS, room_id.as_ref(), true),
                             (keys::LINKED_CHUNKS, &n.index().to_string(), false),
                         ])
                     });
-                    let id = self.encode_key(vec![
+                    let id = self.serializer.encode_key(vec![
                         (keys::ROOMS, room_id.as_ref(), true),
                         (keys::LINKED_CHUNKS, &new.index().to_string(), false),
                     ]);
                     let next_id = next.map(|n| {
-                        self.encode_key(vec![
+                        self.serializer.encode_key(vec![
                             (keys::ROOMS, room_id.as_ref(), true),
                             (keys::LINKED_CHUNKS, &n.index().to_string(), false),
                         ])
@@ -761,7 +533,7 @@ impl_event_cache_store! {
                         type_str: ChunkForCache::CHUNK_TYPE_GAP_TYPE_STRING.to_owned(),
                     };
 
-                    let chunk_serialized = self.serialize_value_with_id(&id, &chunk)?;
+                    let chunk_serialized = self.serializer.serialize_value_with_id(&id, &chunk)?;
 
                     linked_chunks.add_val_owned(chunk_serialized)?;
 
@@ -769,7 +541,7 @@ impl_event_cache_store! {
                         let previous = linked_chunks.get_owned(&previous_id)?.await?;
                         if let Some(previous) = previous {
                             let previous: ChunkForCache =
-                                self.deserialize_value_with_id(previous)?;
+                                self.serializer.deserialize_value_with_id(previous)?;
 
                             let previous = ChunkForCache {
                                 id: previous.id,
@@ -781,7 +553,7 @@ impl_event_cache_store! {
                                 type_str: previous.type_str,
                             };
 
-                            let previous = self.serialize_value_with_id(&previous.id, &previous)?;
+                            let previous = self.serializer.serialize_value_with_id(&previous.id, &previous)?;
 
                             linked_chunks.put_val(&previous)?;
                         }
@@ -791,7 +563,7 @@ impl_event_cache_store! {
                     if let Some(next_id) = next_id {
                         let next = linked_chunks.get_owned(&next_id)?.await?;
                         if let Some(next) = next {
-                            let next: ChunkForCache = self.deserialize_value_with_id(next)?;
+                            let next: ChunkForCache = self.serializer.deserialize_value_with_id(next)?;
 
                             let next = ChunkForCache {
                                 id: next.id,
@@ -803,7 +575,7 @@ impl_event_cache_store! {
                                 type_str: next.type_str,
                             };
 
-                            let next = self.serialize_value_with_id(&next.id, &next)?;
+                            let next = self.serializer.serialize_value_with_id(&next.id, &next)?;
 
                             linked_chunks.put_val(&next)?;
                         }
@@ -811,13 +583,13 @@ impl_event_cache_store! {
 
                     let gap = GapForCache { prev_token: gap.prev_token };
 
-                    let serialized_gap = self.serialize_value_with_id(&id, &gap)?;
+                    let serialized_gap = self.serializer.serialize_value_with_id(&id, &gap)?;
 
                     gaps.add_val_owned(serialized_gap)?;
                 }
 
                 Update::RemoveChunk(id) => {
-                    let id = self.encode_key(vec![
+                    let id = self.serializer.encode_key(vec![
                         (keys::ROOMS, room_id.as_ref(), true),
                         (keys::LINKED_CHUNKS, &id.index().to_string(), false),
                     ]);
@@ -826,13 +598,13 @@ impl_event_cache_store! {
 
                     let chunk = linked_chunks.get_owned(id.clone())?.await?;
                     if let Some(chunk) = chunk {
-                        let chunk: ChunkForCache = self.deserialize_value_with_id(chunk)?;
+                        let chunk: ChunkForCache = self.serializer.deserialize_value_with_id(chunk)?;
 
                         if let Some(previous) = chunk.previous.clone() {
                             let previous = linked_chunks.get_owned(previous)?.await?;
                             if let Some(previous) = previous {
                                 let previous: ChunkForCache =
-                                    self.deserialize_value_with_id(previous)?;
+                                    self.serializer.deserialize_value_with_id(previous)?;
 
                                 let previous = ChunkForCache {
                                     id: previous.id,
@@ -844,7 +616,7 @@ impl_event_cache_store! {
                                     type_str: previous.type_str,
                                 };
                                 let previous =
-                                    self.serialize_value_with_id(&previous.id, &previous)?;
+                                    self.serializer.serialize_value_with_id(&previous.id, &previous)?;
                                 linked_chunks.put_val(&previous)?;
                             }
                         }
@@ -852,7 +624,7 @@ impl_event_cache_store! {
                         if let Some(next) = chunk.next {
                             let next = linked_chunks.get_owned(next)?.await?;
                             if let Some(next) = next {
-                                let next: ChunkForCache = self.deserialize_value_with_id(next)?;
+                                let next: ChunkForCache = self.serializer.deserialize_value_with_id(next)?;
 
                                 let next = ChunkForCache {
                                     id: next.id,
@@ -863,7 +635,7 @@ impl_event_cache_store! {
                                     raw_next: next.raw_next,
                                     type_str: next.type_str,
                                 };
-                                let next = self.serialize_value_with_id(&next.id, &next)?;
+                                let next = self.serializer.serialize_value_with_id(&next.id, &next)?;
 
                                 linked_chunks.put_val(&next)?;
                             }
@@ -878,7 +650,7 @@ impl_event_cache_store! {
                     trace!(%room_id, "pushing {} items @ {chunk_id}", items.len());
 
                     for (i, item) in items.into_iter().enumerate() {
-                        let value = self.serialize_in_band_event(&InBandEventForCache {
+                        let value = self.serializer.serialize_in_band_event(&InBandEventForCache {
                             content: item,
                             room_id: room_id.to_string(),
                             position: PositionForCache {
@@ -895,13 +667,13 @@ impl_event_cache_store! {
                     trace!(%room_id, "replacing item @ {chunk_id}:{index}");
 
                     // First remove the event in the given position, if it exists
-                    let key = self.encode_event_position_key(room_id.as_ref(), &at.into());
+                    let key = self.serializer.encode_event_position_key(room_id.as_ref(), &at.into());
                     if let Some(cursor) = event_positions.open_cursor_with_range(&JsValue::from(key))?.await? {
                         cursor.delete()?.await?;
                     }
 
                     // Then put the new event in the given position
-                    let value = self.serialize_in_band_event(&InBandEventForCache {
+                    let value = self.serializer.serialize_in_band_event(&InBandEventForCache {
                         content: item,
                         room_id: room_id.to_string(),
                         position: at.into(),
@@ -914,7 +686,7 @@ impl_event_cache_store! {
 
                     trace!(%room_id, "removing item @ {chunk_id}:{index}");
 
-                    let key = self.encode_event_position_key(room_id.as_ref(), &at.into());
+                    let key = self.serializer.encode_event_position_key(room_id.as_ref(), &at.into());
                     if let Some(cursor) = event_positions.open_cursor_with_range(&JsValue::from(key))?.await? {
                         cursor.delete()?.await?;
                     }
@@ -925,10 +697,10 @@ impl_event_cache_store! {
 
                     trace!(%room_id, "detaching last items @ {chunk_id}:{index}");
 
-                    let key_range = self.encode_event_position_range_for_chunk_from(room_id.as_ref(), &at.into());
+                    let key_range = self.serializer.encode_event_position_range_for_chunk_from(room_id.as_ref(), &at.into());
                     if let Some(cursor) = event_positions.open_cursor_with_range(&key_range)?.await? {
                         while cursor.key().is_some() {
-                            let event: InBandEventForCache = self.deserialize_in_band_event(cursor.value())?;
+                            let event: InBandEventForCache = self.serializer.deserialize_in_band_event(cursor.value())?;
                             if event.position.index >= index {
                                 cursor.delete()?.await?;
                             }
@@ -941,8 +713,8 @@ impl_event_cache_store! {
                 }
                 Update::Clear => {
                     trace!(%room_id, "clearing all events");
-                    let lower = self.encode_key(vec![(keys::ROOMS, room_id.as_ref(), true)]);
-                    let upper = self.encode_upper_key(vec![(keys::ROOMS, room_id.as_ref(), true)]);
+                    let lower = self.serializer.encode_key(vec![(keys::ROOMS, room_id.as_ref(), true)]);
+                    let upper = self.serializer.encode_upper_key(vec![(keys::ROOMS, room_id.as_ref(), true)]);
 
                     let chunks_key_range =
                         IdbKeyRange::bound(&lower.into(), &upper.into()).unwrap();
@@ -950,9 +722,9 @@ impl_event_cache_store! {
                     let chunks = linked_chunks.get_all_with_key(&chunks_key_range)?.await?;
 
                     for chunk in chunks {
-                        let chunk: ChunkForCache = self.deserialize_value_with_id(chunk)?;
+                        let chunk: ChunkForCache = self.serializer.deserialize_value_with_id(chunk)?;
                         // Delete all events for this chunk
-                        let events_key_range = self.encode_event_position_range_for_chunk(room_id.as_ref(), chunk.raw_id);
+                        let events_key_range = self.serializer.encode_event_position_range_for_chunk(room_id.as_ref(), chunk.raw_id);
                         events.delete_owned(events_key_range)?;
                         linked_chunks.delete_owned(&chunk.id)?;
                     }
@@ -978,8 +750,8 @@ impl_event_cache_store! {
 
         let chunks = tx.object_store(keys::LINKED_CHUNKS)?;
 
-        let lower = self.encode_key(vec![(keys::ROOMS, room_id.as_ref(), true)]);
-        let upper = self.encode_upper_key(vec![(keys::ROOMS, room_id.as_ref(), true)]);
+        let lower = self.serializer.encode_key(vec![(keys::ROOMS, room_id.as_ref(), true)]);
+        let upper = self.serializer.encode_upper_key(vec![(keys::ROOMS, room_id.as_ref(), true)]);
 
         let key_range = IdbKeyRange::bound(&lower.into(), &upper.into()).unwrap();
 
@@ -988,7 +760,7 @@ impl_event_cache_store! {
         let mut raw_chunks = Vec::new();
 
         for linked_chunk in linked_chunks {
-            let linked_chunk: ChunkForCache = self.deserialize_value_with_id(linked_chunk)?;
+            let linked_chunk: ChunkForCache = self.serializer.deserialize_value_with_id(linked_chunk)?;
             let chunk_id = linked_chunk.raw_id;
             let previous_chunk_id = linked_chunk.raw_previous;
             let next_chunk_id = linked_chunk.raw_next;
@@ -1016,7 +788,7 @@ impl_event_cache_store! {
                         .get_owned(id.clone())?
                         .await?
                         .unwrap();
-                    let gap: GapForCache = self.deserialize_value_with_id(gap)?;
+                    let gap: GapForCache = self.serializer.deserialize_value_with_id(gap)?;
                     let gap = Gap { prev_token: gap.prev_token };
 
                     let raw_chunk = RawChunk {
@@ -1057,8 +829,8 @@ impl_event_cache_store! {
         let chunks = tx.object_store(keys::LINKED_CHUNKS)?;
         let gaps = tx.object_store(keys::GAPS)?;
 
-        let lower = self.encode_key(vec![(keys::ROOMS, room_id.as_ref(), true)]);
-        let upper = self.encode_upper_key(vec![(keys::ROOMS, room_id.as_ref(), true)]);
+        let lower = self.serializer.encode_key(vec![(keys::ROOMS, room_id.as_ref(), true)]);
+        let upper = self.serializer.encode_upper_key(vec![(keys::ROOMS, room_id.as_ref(), true)]);
         let range = IdbKeyRange::bound(&lower.into(), &upper.into()).unwrap();
 
         let values = chunks.get_all_with_key(&range)?.await?;
@@ -1069,7 +841,7 @@ impl_event_cache_store! {
             let mut max_chunk_id = 0;
             let mut last_chunks = Vec::new();
             for value in values {
-                let chunk: ChunkForCache = self.deserialize_value_with_id(value)?;
+                let chunk: ChunkForCache = self.serializer.deserialize_value_with_id(value)?;
                 if chunk.raw_id > max_chunk_id {
                     max_chunk_id = chunk.raw_id;
                 }
@@ -1095,7 +867,7 @@ impl_event_cache_store! {
                 }
                 ChunkForCache::CHUNK_TYPE_GAP_TYPE_STRING => {
                     let gap = gaps.get_owned(last_chunk.id.clone())?.await?.unwrap();
-                    let gap: GapForCache = self.deserialize_value_with_id(gap)?;
+                    let gap: GapForCache = self.serializer.deserialize_value_with_id(gap)?;
                     linked_chunk::ChunkContent::Gap(Gap { prev_token: gap.prev_token })
                 }
                 s => {
@@ -1135,15 +907,15 @@ impl_event_cache_store! {
         let chunks = tx.object_store(keys::LINKED_CHUNKS)?;
         let gaps = tx.object_store(keys::GAPS)?;
 
-        let key = self.encode_key(vec![
+        let key = self.serializer.encode_key(vec![
             (keys::ROOMS, room_id.as_ref(), true),
             (keys::LINKED_CHUNKS, &before_chunk_identifier.index().to_string(), false),
         ]);
         if let Some(value) = chunks.get_owned(&key)?.await? {
-            let chunk: ChunkForCache = self.deserialize_value_with_id(value)?;
+            let chunk: ChunkForCache = self.serializer.deserialize_value_with_id(value)?;
             if let Some(previous_key) = chunk.previous {
                 if let Some(value) = chunks.get_owned(&previous_key)?.await? {
-                    let previous_chunk: ChunkForCache = self.deserialize_value_with_id(value)?;
+                    let previous_chunk: ChunkForCache = self.serializer.deserialize_value_with_id(value)?;
                     let content = match previous_chunk.type_str.as_str() {
                         ChunkForCache::CHUNK_TYPE_EVENT_TYPE_STRING => {
                             let events = self.get_all_timeline_events_by_chunk(room_id.as_ref(), previous_chunk.raw_id).await?;
@@ -1151,7 +923,7 @@ impl_event_cache_store! {
                         }
                         ChunkForCache::CHUNK_TYPE_GAP_TYPE_STRING => {
                             let gap = gaps.get_owned(previous_chunk.id.clone())?.await?.unwrap();
-                            let gap: GapForCache = self.deserialize_value_with_id(gap)?;
+                            let gap: GapForCache = self.serializer.deserialize_value_with_id(gap)?;
                             linked_chunk::ChunkContent::Gap(Gap { prev_token: gap.prev_token })
                         }
                         s => {
@@ -1291,7 +1063,7 @@ impl_event_cache_store! {
                 position: (),
             })
         };
-        let value = self.serialize_event(&event)?;
+        let value = self.serializer.serialize_event(&event)?;
         self
             .inner
             .transaction_on_multi_with_mode(&[keys::EVENTS], IdbTransactionMode::Readwrite)?
@@ -1661,7 +1433,7 @@ mod tests {
         let gaps = object_store.get_all().unwrap().await.unwrap();
         let mut gap_ids = Vec::new();
         for gap in gaps {
-            let gap: ChunkForCache = store.deserialize_value_with_id(gap).unwrap();
+            let gap: ChunkForCache = store.serializer.deserialize_value_with_id(gap).unwrap();
             let chunk_id = gap.raw_id;
             gap_ids.push(chunk_id);
         }

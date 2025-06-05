@@ -84,6 +84,13 @@ impl IndexeddbEventCacheStoreSerializer {
         key
     }
 
+    pub fn serialize_value(
+        &self,
+        value: &impl Serialize,
+    ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
+        self.inner.serialize_value(value).map_err(Into::into)
+    }
+
     /// Serializes `value` and wraps it with a `ValueWithId` using `id`.
     ///
     /// This helps to ensure that values are well-formed before putting them
@@ -241,6 +248,15 @@ impl IndexeddbEventCacheStoreSerializer {
             EventForCache::InBand(i) => self.serialize_in_band_event(i),
             EventForCache::OutOfBand(o) => self.serialize_out_of_band_event(o),
         }
+    }
+
+    /// Decode a value that was previously encoded with
+    /// [`Self::serialize_value`].
+    pub fn deserialize_value<T: DeserializeOwned>(
+        &self,
+        value: JsValue,
+    ) -> Result<T, IndexeddbEventCacheStoreError> {
+        self.inner.deserialize_value(value).map_err(Into::into)
     }
 
     pub fn deserialize_generic_event<P: DeserializeOwned>(
