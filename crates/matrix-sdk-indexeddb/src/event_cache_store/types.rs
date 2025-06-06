@@ -21,12 +21,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Chunk {
-    pub id: String,
-    pub raw_id: u64,
-    pub previous: Option<String>,
-    pub raw_previous: Option<u64>,
-    pub next: Option<String>,
-    pub raw_next: Option<u64>,
+    pub identifier: u64,
+    pub previous: Option<u64>,
+    pub next: Option<u64>,
     pub type_str: String,
 }
 

@@ -15,7 +15,8 @@
 mod types;
 
 use gloo_utils::format::JsValueSerdeExt;
-use ruma::{events::relation::RelationType, EventId};
+use matrix_sdk_base::linked_chunk::ChunkIdentifier;
+use ruma::{events::relation::RelationType, EventId, RoomId};
 use serde::{de::DeserializeOwned, Serialize};
 use wasm_bindgen::JsValue;
 use web_sys::IdbKeyRange;
@@ -23,8 +24,10 @@ use web_sys::IdbKeyRange;
 use crate::{
     event_cache_store::{
         keys,
-        serializer::types::{IndexedEvent, ValueWithId},
-        types::{Event, GenericEvent, InBandEvent, OutOfBandEvent, Position},
+        serializer::types::{
+            IndexedChunk, IndexedChunkIdKey, IndexedEvent, IndexedNextChunkIdKey, ValueWithId,
+        },
+        types::{Chunk, Event, GenericEvent, InBandEvent, OutOfBandEvent, Position},
     },
     serializer::IndexeddbSerializer,
     IndexeddbEventCacheStoreError,
@@ -119,6 +122,56 @@ impl IndexeddbEventCacheStoreSerializer {
         let obj: ValueWithId = value.into_serde()?;
         let deserialized: T = self.inner.maybe_decrypt_value(obj.value)?;
         Ok(deserialized)
+    }
+
+    pub fn encode_chunk_id_key(
+        &self,
+        room_id: &RoomId,
+        chunk_id: &ChunkIdentifier,
+    ) -> IndexedChunkIdKey {
+        let room_id = self.inner.encode_key_as_string(keys::LINKED_CHUNKS, room_id);
+        let chunk_id = chunk_id.index();
+        IndexedChunkIdKey::new(room_id, chunk_id)
+    }
+
+    pub fn encode_chunk_id_key_as_value(
+        &self,
+        room_id: &RoomId,
+        chunk_id: &ChunkIdentifier,
+    ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
+        Ok(serde_wasm_bindgen::to_value(&self.encode_chunk_id_key(room_id, chunk_id))?)
+    }
+
+    pub fn encode_next_chunk_id_key(
+        &self,
+        room_id: &RoomId,
+        next_chunk_id: Option<ChunkIdentifier>,
+    ) -> IndexedNextChunkIdKey {
+        next_chunk_id
+            .map(|id| IndexedNextChunkIdKey::Some(self.encode_chunk_id_key(room_id, &id)))
+            .unwrap_or_else(|| {
+                let room_id = self.inner.encode_key_as_string(keys::LINKED_CHUNKS, room_id);
+                IndexedNextChunkIdKey::None((room_id,))
+            })
+    }
+
+    pub fn encode_lower_chunk_id_key(&self, room_id: &RoomId) -> IndexedChunkIdKey {
+        let room_id = self.inner.encode_key_as_string(keys::LINKED_CHUNKS, room_id);
+        IndexedChunkIdKey::new(room_id, 0)
+    }
+
+    pub fn encode_upper_chunk_id_key(&self, room_id: &RoomId) -> IndexedChunkIdKey {
+        let room_id = self.inner.encode_key_as_string(keys::LINKED_CHUNKS, room_id);
+        IndexedChunkIdKey::new(room_id, js_sys::Number::MAX_SAFE_INTEGER as u64)
+    }
+
+    pub fn encode_chunk_id_range_for_room(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<IdbKeyRange, IndexeddbEventCacheStoreError> {
+        let lower = serde_wasm_bindgen::to_value(&self.encode_lower_chunk_id_key(room_id))?;
+        let upper = serde_wasm_bindgen::to_value(&self.encode_upper_chunk_id_key(room_id))?;
+        Ok(IdbKeyRange::bound(&lower, &upper).expect("construct key range"))
     }
 
     pub fn encode_event_position_key(&self, room_id: &str, position: &Position) -> String {
@@ -274,6 +327,26 @@ impl IndexeddbEventCacheStoreSerializer {
         value: JsValue,
     ) -> Result<Event, IndexeddbEventCacheStoreError> {
         let indexed: IndexedEvent = value.into_serde()?;
+        self.inner.maybe_decrypt_value(indexed.content).map_err(Into::into)
+    }
+
+    pub fn serialize_chunk(
+        &self,
+        room_id: &RoomId,
+        chunk: &Chunk,
+    ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
+        Ok(serde_wasm_bindgen::to_value(&IndexedChunk {
+            id: self.encode_chunk_id_key(room_id, &ChunkIdentifier::new(chunk.identifier)),
+            next: self.encode_next_chunk_id_key(room_id, chunk.next.map(ChunkIdentifier::new)),
+            content: self.inner.maybe_encrypt_value(chunk)?,
+        })?)
+    }
+
+    pub fn deserialize_chunk(
+        &self,
+        value: JsValue,
+    ) -> Result<Chunk, IndexeddbEventCacheStoreError> {
+        let indexed: IndexedChunk = value.into_serde()?;
         self.inner.maybe_decrypt_value(indexed.content).map_err(Into::into)
     }
 }
