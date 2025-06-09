@@ -553,15 +553,15 @@ impl_event_cache_store! {
                     self.delete_chunk_by_id_with_transaction(&tx, room_id, &id).await?;
                 }
                 Update::PushItems { at, items } => {
-                    let chunk_id = at.chunk_identifier().index();
+                    let chunk_identifier = at.chunk_identifier().index();
 
-                    trace!(%room_id, "pushing {} items @ {chunk_id}", items.len());
+                    trace!(%room_id, "pushing {} items @ {chunk_identifier}", items.len());
 
                     for (i, item) in items.into_iter().enumerate() {
                         let value = self.serializer.serialize_in_band_event(room_id, &InBandEvent {
                             content: item,
                             position: types::Position {
-                                chunk_id, index: at.index() + i,
+                                chunk_identifier, index: at.index() + i,
                             },
                         })?;
                         events.put_val(&value)?.into_future().await?;

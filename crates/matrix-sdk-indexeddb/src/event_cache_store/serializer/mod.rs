@@ -169,7 +169,7 @@ impl IndexeddbEventCacheStoreSerializer {
         position: &Position,
     ) -> IndexedEventPositionKey {
         let room_id = self.inner.encode_key_as_string(keys::ROOMS, room_id);
-        IndexedEventPositionKey::new(room_id, position.chunk_id, position.index)
+        IndexedEventPositionKey::new(room_id, position.chunk_identifier, position.index)
     }
 
     pub fn encode_event_position_key_as_value(
@@ -196,8 +196,10 @@ impl IndexeddbEventCacheStoreSerializer {
         chunk_id: u64,
     ) -> Result<IdbKeyRange, IndexeddbEventCacheStoreError> {
         use serde_wasm_bindgen::to_value;
-        let lower =
-            to_value(&self.encode_event_position_key(room_id, &Position { chunk_id, index: 0 }))?;
+        let lower = to_value(&self.encode_event_position_key(
+            room_id,
+            &Position { chunk_identifier: chunk_id, index: 0 },
+        ))?;
         let upper = to_value(&self.encode_upper_event_position_key_for_chunk(room_id, chunk_id))?;
         Ok(IdbKeyRange::bound(&lower, &upper).expect("construct key range"))
     }
@@ -209,8 +211,9 @@ impl IndexeddbEventCacheStoreSerializer {
     ) -> Result<IdbKeyRange, IndexeddbEventCacheStoreError> {
         use serde_wasm_bindgen::to_value;
         let lower = to_value(&self.encode_event_position_key(room_id, position))?;
-        let upper =
-            to_value(&self.encode_upper_event_position_key_for_chunk(room_id, position.chunk_id))?;
+        let upper = to_value(
+            &self.encode_upper_event_position_key_for_chunk(room_id, position.chunk_identifier),
+        )?;
         Ok(IdbKeyRange::bound(&lower, &upper).expect("construct key range"))
     }
 
