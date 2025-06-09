@@ -153,3 +153,24 @@ impl IndexedEventRelationKey {
 pub type IndexedRelationType = String;
 
 pub type IndexedEventContent = MaybeEncrypted;
+
+/// Represents the [`GAPS`][1] object store.
+///
+/// [1]: crate::event_cache_store::migrations::v1::create_gaps_object_store
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IndexedGap {
+    /// The primary key of the object store
+    pub id: IndexedGapIdKey,
+    /// The (possibly) encrypted content of the gap
+    pub content: IndexedGapContent,
+}
+
+/// The primary key of the [`GAPS`][1] object store, which is constructed from:
+///
+/// - The (possibly) encrypted Room ID
+/// - The Chunk ID
+///
+/// [1]: crate::event_cache_store::migrations::v1::create_gaps_object_store
+pub type IndexedGapIdKey = IndexedChunkIdKey;
+
+pub type IndexedGapContent = MaybeEncrypted;
