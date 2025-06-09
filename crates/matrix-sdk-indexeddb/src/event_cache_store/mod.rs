@@ -48,7 +48,7 @@ use web_sys::IdbTransactionMode;
 use crate::{
     event_cache_store::{
         serializer::IndexeddbEventCacheStoreSerializer,
-        types::{InBandEvent, OutOfBandEvent},
+        types::{ChunkType, InBandEvent, OutOfBandEvent},
     },
     serializer::IndexeddbSerializerError,
 };
@@ -82,8 +82,6 @@ pub enum IndexeddbEventCacheStoreError {
     Unsupported,
     #[error(transparent)]
     CryptoStoreError(#[from] CryptoStoreError),
-    #[error("unknown chunk type: {0}")]
-    UnknownChunkType(String),
     #[error("chunks contain cycle")]
     ChunksContainCycle,
     #[error("chunks contain disjoint lists")]
@@ -529,7 +527,7 @@ impl_event_cache_store! {
                         identifier: new.index(),
                         previous: previous.map(|i| i.index()),
                         next: next.map(|i| i.index()),
-                        type_str: types::Chunk::CHUNK_TYPE_EVENT_TYPE_STRING.to_owned(),
+                        chunk_type: ChunkType::Event,
                     }).await?;
                 }
                 Update::NewGapChunk { previous, new, next, gap } => {
@@ -547,7 +545,7 @@ impl_event_cache_store! {
                         identifier: new.index(),
                         previous: previous.map(|i| i.index()),
                         next: next.map(|i| i.index()),
-                        type_str: types::Chunk::CHUNK_TYPE_GAP_TYPE_STRING.to_owned(),
+                        chunk_type: ChunkType::Gap,
                     }).await?;
                 }
                 Update::RemoveChunk(id) => {
@@ -646,11 +644,11 @@ impl_event_cache_store! {
         let mut result = Vec::new();
         let chunks = self.get_all_chunks_in_room(room_id).await?;
         for chunk in chunks {
-            let content = match chunk.type_str.as_str() {
-                types::Chunk::CHUNK_TYPE_EVENT_TYPE_STRING => {
+            let content = match chunk.chunk_type {
+                ChunkType::Event => {
                     ChunkContent::Items(self.get_all_timeline_events_by_chunk(room_id.as_ref(), chunk.identifier).await?)
                 }
-                types::Chunk::CHUNK_TYPE_GAP_TYPE_STRING => {
+                ChunkType::Gap => {
                     let gap_id = self.serializer.encode_key(vec![
                         (keys::ROOMS, room_id.as_ref(), true),
                         (keys::LINKED_CHUNKS, &chunk.identifier.to_string(), false),
@@ -665,11 +663,6 @@ impl_event_cache_store! {
                     let gap: types::Gap = self.serializer.deserialize_value_with_id(gap)?;
                     let gap = Gap { prev_token: gap.prev_token };
                     ChunkContent::Gap(gap)
-                }
-                _ => {
-                    return Err(IndexeddbEventCacheStoreError::UnknownChunkType(
-                        chunk.type_str.clone(),
-                    ));
                 }
             };
             let raw_chunk = RawChunk {
@@ -720,12 +713,12 @@ impl_event_cache_store! {
                 return Err(IndexeddbEventCacheStoreError::ChunksContainCycle);
             };
 
-            let content = match last_chunk.type_str.as_str() {
-                types::Chunk::CHUNK_TYPE_EVENT_TYPE_STRING => {
+            let content = match last_chunk.chunk_type {
+                ChunkType::Event => {
                     let events = self.get_all_timeline_events_by_chunk(room_id.as_ref(), last_chunk.identifier).await?;
                     ChunkContent::Items(events)
                 }
-                types::Chunk::CHUNK_TYPE_GAP_TYPE_STRING => {
+                ChunkType::Gap => {
                     let gap_id = self.serializer.encode_key(vec![
                         (keys::ROOMS, room_id.as_ref(), true),
                         (keys::LINKED_CHUNKS, &last_chunk.identifier.to_string(), false),
@@ -739,9 +732,6 @@ impl_event_cache_store! {
                         .unwrap();
                     let gap: types::Gap = self.serializer.deserialize_value_with_id(gap)?;
                     ChunkContent::Gap(Gap { prev_token: gap.prev_token })
-                }
-                s => {
-                    return Err(IndexeddbEventCacheStoreError::UnknownChunkType(s.to_owned()));
                 }
             };
             let raw_chunk = RawChunk {
@@ -770,12 +760,12 @@ impl_event_cache_store! {
         if let Some(chunk) = self.get_chunk_by_id(room_id, &before_chunk_identifier).await? {
             if let Some(previous_identifier) = chunk.previous {
                 if let Some(previous_chunk) = self.get_chunk_by_id(room_id, &ChunkIdentifier::new(previous_identifier)).await? {
-                    let content = match previous_chunk.type_str.as_str() {
-                        types::Chunk::CHUNK_TYPE_EVENT_TYPE_STRING => {
+                    let content = match previous_chunk.chunk_type {
+                        ChunkType::Event => {
                             let events = self.get_all_timeline_events_by_chunk(room_id.as_ref(), previous_chunk.identifier).await?;
                             ChunkContent::Items(events)
                         }
-                        types::Chunk::CHUNK_TYPE_GAP_TYPE_STRING => {
+                        ChunkType::Gap => {
                             let gap_id = self.serializer.encode_key(vec![
                                 (keys::ROOMS, room_id.as_ref(), true),
                                 (keys::LINKED_CHUNKS, &previous_identifier.to_string(), false),
@@ -789,11 +779,6 @@ impl_event_cache_store! {
                                 .unwrap();
                             let gap: types::Gap = self.serializer.deserialize_value_with_id(gap)?;
                             ChunkContent::Gap(Gap { prev_token: gap.prev_token })
-                        }
-                        s => {
-                            return Err(IndexeddbEventCacheStoreError::UnknownChunkType(
-                                s.to_owned(),
-                            ));
                         }
                     };
                     return Ok(Some(RawChunk {

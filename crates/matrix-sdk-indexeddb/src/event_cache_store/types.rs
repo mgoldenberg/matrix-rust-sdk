@@ -19,19 +19,29 @@ use matrix_sdk_base::{
 use ruma::OwnedEventId;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Representation of a [`Chunk`](matrix_sdk_base::linked_chunk::Chunk)
+/// which can be stored in IndexedDB.
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct Chunk {
+    /// The identifier of the chunk - i.e.,
+    /// [`ChunkIdentifier`](matrix_sdk_base::linked_chunk::ChunkIdentifier).
     pub identifier: u64,
+    /// The previous chunk in the list.
     pub previous: Option<u64>,
+    /// The next chunk in the list.
     pub next: Option<u64>,
-    pub type_str: String,
+    /// The type of the chunk.
+    pub chunk_type: ChunkType,
 }
 
-impl Chunk {
-    /// Used to set field `type_str` to represent a chunk that contains events
-    pub const CHUNK_TYPE_EVENT_TYPE_STRING: &str = "E";
-    /// Used to set field `type_str` to represent a chunk that is a gap
-    pub const CHUNK_TYPE_GAP_TYPE_STRING: &str = "G";
+/// The type of a [`Chunk`](Chunk)
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChunkType {
+    /// A chunk that holds events.
+    Event,
+    /// A chunk that represents a gap.
+    Gap,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -60,7 +70,7 @@ impl Event {
 pub type InBandEvent = GenericEvent<Position>;
 pub type OutOfBandEvent = GenericEvent<()>;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenericEvent<P> {
     pub content: TimelineEvent,
     pub position: P,
