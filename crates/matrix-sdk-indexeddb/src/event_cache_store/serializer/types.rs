@@ -69,10 +69,87 @@ impl IndexedChunkIdKey {
     }
 }
 
+/// Represents the [`EVENTS`][1] object store.
+///
+/// [1]: crate::event_cache_store::migrations::v1::create_events_object_store
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IndexedEvent {
-    pub id: String,
-    pub position: Option<String>,
-    pub relation: Option<String>,
-    pub content: MaybeEncrypted,
+    /// The primary key of the object store.
+    pub id: IndexedEventIdKey,
+    /// An indexed key on the object store, which represents the position of the
+    /// event, if it is in a chunk.
+    pub position: Option<IndexedEventPositionKey>,
+    /// An indexed key on the object store, which represents the relationship
+    /// between this event and another event, if one exists.
+    pub relation: Option<IndexedEventRelationKey>,
+    /// The (possibly) encrypted content of the event.
+    pub content: IndexedEventContent,
 }
+
+/// The value associated with the [primary key](IndexedEvent::id) of the
+/// [`EVENTS`][1] object store, which is constructed from:
+///
+/// - The (possibly) encrypted Room ID
+/// - The (possibly) encrypted Event ID.
+///
+/// [1]: crate::event_cache_store::migrations::v1::create_events_object_store
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IndexedEventIdKey(IndexedRoomId, IndexedEventId);
+
+impl IndexedEventIdKey {
+    pub fn new(room_id: IndexedRoomId, event_id: IndexedEventId) -> Self {
+        Self(room_id, event_id)
+    }
+}
+
+pub type IndexedEventId = String;
+
+/// The value associated with the [`position`](IndexedEvent::position) index of
+/// the [`EVENTS`][1] object store, which is constructed from:
+///
+/// - The (possibly) encrypted Room ID
+/// - The Chunk ID
+/// - The index of the event in the chunk.
+///
+/// [1]: crate::event_cache_store::migrations::v1::create_events_object_store
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IndexedEventPositionKey(IndexedRoomId, IndexedChunkId, IndexedEventPositionIndex);
+
+impl IndexedEventPositionKey {
+    pub fn new(
+        room_id: IndexedRoomId,
+        chunk_id: IndexedChunkId,
+        position: IndexedEventPositionIndex,
+    ) -> Self {
+        Self(room_id, chunk_id, position)
+    }
+}
+
+pub type IndexedEventPositionIndex = usize;
+
+/// The value associated with the [`relation`](IndexedEvent::relation) index of
+/// the [`EVENTS`][1] object store, which is constructed from:
+///
+/// - The (possibly) encrypted Room ID
+/// - The (possibly) encrypted Event ID of the related event
+/// - The type of relationship between the events
+///
+/// [1]: crate::event_cache_store::migrations::v1::create_events_object_store
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IndexedEventRelationKey(IndexedRoomId, IndexedEventId, IndexedRelationType);
+
+impl IndexedEventRelationKey {
+    pub fn new(
+        room_id: IndexedRoomId,
+        related_event_id: IndexedEventId,
+        relation_type: IndexedRelationType,
+    ) -> Self {
+        Self(room_id, related_event_id, relation_type)
+    }
+}
+
+/// A representation of the relationship between two events (see
+/// [`RelationType`](ruma::events::relation::RelationType))
+pub type IndexedRelationType = String;
+
+pub type IndexedEventContent = MaybeEncrypted;

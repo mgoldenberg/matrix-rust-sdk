@@ -63,7 +63,6 @@ pub type OutOfBandEvent = GenericEvent<()>;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GenericEvent<P> {
     pub content: TimelineEvent,
-    pub room_id: String,
     pub position: P,
 }
 

@@ -180,8 +180,9 @@ impl IndexeddbEventCacheStore {
         room_id: &RoomId,
         event_id: &EventId,
     ) -> Result<Option<types::Event>, IndexeddbEventCacheStoreError> {
-        let key = self.serializer.encode_event_id_key(room_id.as_ref(), event_id);
-        let mut events = self.get_all_events_by_id(&JsValue::from(key)).await?;
+        let key =
+            serde_wasm_bindgen::to_value(&self.serializer.encode_event_id_key(room_id, event_id))?;
+        let mut events = self.get_all_events_by_id(&key).await?;
         if events.len() > 1 {
             return Err(IndexeddbEventCacheStoreError::DuplicateEventId);
         }
@@ -209,25 +210,25 @@ impl IndexeddbEventCacheStore {
     async fn get_all_events_by_relation(
         &self,
         room_id: &RoomId,
-        related_event: &EventId,
+        related_event_id: &EventId,
         relation_type: &RelationType,
     ) -> Result<Vec<types::Event>, IndexeddbEventCacheStoreError> {
-        let key = self.serializer.encode_event_relation_key(
-            room_id.as_ref(),
-            related_event,
+        let key = serde_wasm_bindgen::to_value(&self.serializer.encode_event_relation_key(
+            room_id,
+            related_event_id,
             relation_type,
-        );
-        self.get_all_events_by_relation_range(&JsValue::from(key)).await
+        ))?;
+        self.get_all_events_by_relation_range(&key).await
     }
 
     async fn get_all_events_by_related_event(
         &self,
         room_id: &RoomId,
-        related_event: &EventId,
+        related_event_id: &EventId,
     ) -> Result<Vec<types::Event>, IndexeddbEventCacheStoreError> {
         let range = self
             .serializer
-            .encode_event_relation_range_for_related_event(room_id.as_ref(), related_event);
+            .encode_event_relation_range_for_related_event(room_id, related_event_id)?;
         self.get_all_events_by_relation_range(&range).await
     }
 
@@ -237,7 +238,7 @@ impl IndexeddbEventCacheStore {
         chunk_id: u64,
     ) -> Result<Vec<InBandEvent>, IndexeddbEventCacheStoreError> {
         let range =
-            self.serializer.encode_event_position_range_for_chunk(room_id.as_ref(), chunk_id);
+            self.serializer.encode_event_position_range_for_chunk(room_id.as_ref(), chunk_id)?;
         let values = self.get_all_events_by_position(&range).await?;
         let mut events = Vec::new();
         for event in values {
@@ -559,9 +560,8 @@ impl_event_cache_store! {
                     trace!(%room_id, "pushing {} items @ {chunk_id}", items.len());
 
                     for (i, item) in items.into_iter().enumerate() {
-                        let value = self.serializer.serialize_in_band_event(&InBandEvent {
+                        let value = self.serializer.serialize_in_band_event(room_id, &InBandEvent {
                             content: item,
-                            room_id: room_id.to_string(),
                             position: types::Position {
                                 chunk_id, index: at.index() + i,
                             },
@@ -576,15 +576,14 @@ impl_event_cache_store! {
                     trace!(%room_id, "replacing item @ {chunk_id}:{index}");
 
                     // First remove the event in the given position, if it exists
-                    let key = self.serializer.encode_event_position_key(room_id.as_ref(), &at.into());
-                    if let Some(cursor) = event_positions.open_cursor_with_range(&JsValue::from(key))?.await? {
+                    let key = self.serializer.encode_event_position_key_as_value(room_id.as_ref(), &at.into())?;
+                    if let Some(cursor) = event_positions.open_cursor_with_range(&key)?.await? {
                         cursor.delete()?.await?;
                     }
 
                     // Then put the new event in the given position
-                    let value = self.serializer.serialize_in_band_event(&InBandEvent {
+                    let value = self.serializer.serialize_in_band_event(room_id, &InBandEvent {
                         content: item,
-                        room_id: room_id.to_string(),
                         position: at.into(),
                     })?;
                     events.put_val(&value)?.await?;
@@ -595,8 +594,8 @@ impl_event_cache_store! {
 
                     trace!(%room_id, "removing item @ {chunk_id}:{index}");
 
-                    let key = self.serializer.encode_event_position_key(room_id.as_ref(), &at.into());
-                    if let Some(cursor) = event_positions.open_cursor_with_range(&JsValue::from(key))?.await? {
+                    let key = self.serializer.encode_event_position_key_as_value(room_id.as_ref(), &at.into())?;
+                    if let Some(cursor) = event_positions.open_cursor_with_range(&key)?.await? {
                         cursor.delete()?.await?;
                     }
                 }
@@ -606,7 +605,7 @@ impl_event_cache_store! {
 
                     trace!(%room_id, "detaching last items @ {chunk_id}:{index}");
 
-                    let key_range = self.serializer.encode_event_position_range_for_chunk_from(room_id.as_ref(), &at.into());
+                    let key_range = self.serializer.encode_event_position_range_for_chunk_from(room_id.as_ref(), &at.into())?;
                     if let Some(cursor) = event_positions.open_cursor_with_range(&key_range)?.await? {
                         while cursor.key().is_some() {
                             let event: InBandEvent = self.serializer.deserialize_in_band_event(cursor.value())?;
@@ -625,7 +624,7 @@ impl_event_cache_store! {
                     let chunks = self.get_all_chunks_in_room_with_transaction(&tx, room_id).await?;
                     for chunk in chunks {
                         // Delete all events for this chunk
-                        let events_key_range = self.serializer.encode_event_position_range_for_chunk(room_id.as_ref(), chunk.identifier);
+                        let events_key_range = self.serializer.encode_event_position_range_for_chunk(room_id.as_ref(), chunk.identifier)?;
                         events.delete_owned(events_key_range)?;
                         linked_chunks.delete_owned(self.serializer.encode_chunk_id_key_as_value(room_id, &ChunkIdentifier::new(chunk.identifier))?)?;
                     }
@@ -924,11 +923,10 @@ impl_event_cache_store! {
             },
             None => types::Event::OutOfBand(OutOfBandEvent {
                 content: event,
-                room_id: room_id.to_string(),
                 position: (),
             })
         };
-        let value = self.serializer.serialize_event(&event)?;
+        let value = self.serializer.serialize_event(room_id, &event)?;
         self
             .inner
             .transaction_on_multi_with_mode(&[keys::EVENTS], IdbTransactionMode::Readwrite)?

@@ -25,7 +25,8 @@ use crate::{
     event_cache_store::{
         keys,
         serializer::types::{
-            IndexedChunk, IndexedChunkIdKey, IndexedEvent, IndexedNextChunkIdKey, ValueWithId,
+            IndexedChunk, IndexedChunkIdKey, IndexedEvent, IndexedEventIdKey,
+            IndexedEventPositionKey, IndexedEventRelationKey, IndexedNextChunkIdKey, ValueWithId,
         },
         types::{Chunk, Event, GenericEvent, InBandEvent, OutOfBandEvent, Position},
     },
@@ -72,18 +73,6 @@ impl IndexeddbEventCacheStoreSerializer {
             end_key.push_str(&encoded_key);
         }
         end_key
-    }
-
-    /// Same as `Self::encode_key`, but appends `Self::KEY_SEPARATOR` and
-    /// `Self::KEY_UPPER_CHARACTER`.
-    ///
-    /// This is useful when constructing range queries, as it provides an upper
-    /// key for a collection of `parts`.
-    pub fn encode_upper_key(&self, parts: Vec<(&str, &str, bool)>) -> String {
-        let mut key = self.encode_key(parts);
-        key.push(Self::KEY_SEPARATOR);
-        key.push(Self::KEY_UPPER_CHARACTER);
-        key
     }
 
     pub fn serialize_value(
@@ -174,90 +163,127 @@ impl IndexeddbEventCacheStoreSerializer {
         Ok(IdbKeyRange::bound(&lower, &upper).expect("construct key range"))
     }
 
-    pub fn encode_event_position_key(&self, room_id: &str, position: &Position) -> String {
-        self.encode_key(vec![
-            (keys::ROOMS, room_id, true),
-            (keys::LINKED_CHUNKS, &position.chunk_id.to_string(), false),
-            (keys::EVENTS, &position.index.to_string(), false),
-        ])
+    pub fn encode_event_position_key(
+        &self,
+        room_id: &RoomId,
+        position: &Position,
+    ) -> IndexedEventPositionKey {
+        let room_id = self.inner.encode_key_as_string(keys::ROOMS, room_id);
+        IndexedEventPositionKey::new(room_id, position.chunk_id, position.index)
+    }
+
+    pub fn encode_event_position_key_as_value(
+        &self,
+        room_id: &RoomId,
+        position: &Position,
+    ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
+        serde_wasm_bindgen::to_value(&self.encode_event_position_key(room_id, position))
+            .map_err(Into::into)
     }
 
     pub fn encode_upper_event_position_key_for_chunk(
         &self,
-        room_id: &str,
+        room_id: &RoomId,
         chunk_id: u64,
-    ) -> String {
-        self.encode_upper_key(vec![
-            (keys::ROOMS, room_id, true),
-            (keys::LINKED_CHUNKS, &chunk_id.to_string(), false),
-        ])
+    ) -> IndexedEventPositionKey {
+        let room_id = self.inner.encode_key_as_string(keys::ROOMS, room_id);
+        IndexedEventPositionKey::new(room_id, chunk_id, js_sys::Number::MAX_SAFE_INTEGER as usize)
     }
 
     pub fn encode_event_position_range_for_chunk(
         &self,
-        room_id: &str,
+        room_id: &RoomId,
         chunk_id: u64,
-    ) -> IdbKeyRange {
-        let lower = self.encode_event_position_key(room_id, &Position { chunk_id, index: 0 });
-        let upper = self.encode_upper_event_position_key_for_chunk(room_id, chunk_id);
-        IdbKeyRange::bound(&lower.into(), &upper.into()).expect("construct key range")
+    ) -> Result<IdbKeyRange, IndexeddbEventCacheStoreError> {
+        use serde_wasm_bindgen::to_value;
+        let lower =
+            to_value(&self.encode_event_position_key(room_id, &Position { chunk_id, index: 0 }))?;
+        let upper = to_value(&self.encode_upper_event_position_key_for_chunk(room_id, chunk_id))?;
+        Ok(IdbKeyRange::bound(&lower, &upper).expect("construct key range"))
     }
 
     pub fn encode_event_position_range_for_chunk_from(
         &self,
-        room_id: &str,
+        room_id: &RoomId,
         position: &Position,
-    ) -> IdbKeyRange {
-        let lower = self.encode_event_position_key(room_id, position);
-        let upper = self.encode_upper_event_position_key_for_chunk(room_id, position.chunk_id);
-        IdbKeyRange::bound(&lower.into(), &upper.into()).expect("construct key range")
+    ) -> Result<IdbKeyRange, IndexeddbEventCacheStoreError> {
+        use serde_wasm_bindgen::to_value;
+        let lower = to_value(&self.encode_event_position_key(room_id, position))?;
+        let upper =
+            to_value(&self.encode_upper_event_position_key_for_chunk(room_id, position.chunk_id))?;
+        Ok(IdbKeyRange::bound(&lower, &upper).expect("construct key range"))
     }
 
-    pub fn encode_event_id_key(&self, room_id: &str, event_id: &EventId) -> String {
-        self.encode_key(vec![(keys::ROOMS, room_id, true), (keys::EVENTS, event_id.as_ref(), true)])
+    pub fn encode_event_id_key(&self, room_id: &RoomId, event_id: &EventId) -> IndexedEventIdKey {
+        let room_id = self.inner.encode_key_as_string(keys::ROOMS, room_id);
+        let event_id = self.inner.encode_key_as_string(keys::EVENTS, event_id);
+        IndexedEventIdKey::new(room_id, event_id)
     }
 
     pub fn encode_event_relation_key(
         &self,
-        room_id: &str,
-        related_event: &EventId,
+        room_id: &RoomId,
+        related_event_id: &EventId,
         relation_type: &RelationType,
-    ) -> String {
-        self.encode_key(vec![
-            (keys::ROOMS, room_id, true),
-            (keys::EVENT_RELATED_EVENTS, related_event.as_ref(), true),
-            (keys::EVENT_RELATION_TYPES, relation_type.as_ref(), true),
-        ])
+    ) -> IndexedEventRelationKey {
+        let room_id = self.inner.encode_key_as_string(keys::ROOMS, room_id);
+        let related_event =
+            self.inner.encode_key_as_string(keys::EVENT_RELATED_EVENTS, related_event_id);
+        let relation_type =
+            self.inner.encode_key_as_string(keys::EVENT_RELATION_TYPES, relation_type.to_string());
+        IndexedEventRelationKey::new(room_id, related_event, relation_type)
+    }
+
+    pub fn encode_lower_event_relation_key_for_related_event(
+        &self,
+        room_id: &RoomId,
+        related_event_id: &EventId,
+    ) -> IndexedEventRelationKey {
+        let room_id = self.inner.encode_key_as_string(keys::ROOMS, room_id);
+        let related_event_id =
+            self.inner.encode_key_as_string(keys::EVENT_RELATED_EVENTS, related_event_id);
+        let relation_type = String::from(Self::KEY_LOWER_CHARACTER);
+        IndexedEventRelationKey::new(room_id, related_event_id, relation_type)
+    }
+
+    pub fn encode_upper_event_relation_key_for_related_event(
+        &self,
+        room_id: &RoomId,
+        related_event_id: &EventId,
+    ) -> IndexedEventRelationKey {
+        let room_id = self.inner.encode_key_as_string(keys::ROOMS, room_id);
+        let related_event_id =
+            self.inner.encode_key_as_string(keys::EVENT_RELATED_EVENTS, related_event_id);
+        let relation_type = String::from(Self::KEY_UPPER_CHARACTER);
+        IndexedEventRelationKey::new(room_id, related_event_id, relation_type)
     }
 
     pub fn encode_event_relation_range_for_related_event(
         &self,
-        room_id: &str,
-        related_event: &EventId,
-    ) -> IdbKeyRange {
-        let lower = self.encode_key(vec![
-            (keys::ROOMS, room_id, true),
-            (keys::EVENT_RELATED_EVENTS, related_event.as_ref(), true),
-            (keys::EVENT_RELATION_TYPES, &String::from(Self::KEY_LOWER_CHARACTER), false),
-        ]);
-        let upper = self.encode_key(vec![
-            (keys::ROOMS, room_id, true),
-            (keys::EVENT_RELATED_EVENTS, related_event.as_ref(), true),
-            (keys::EVENT_RELATION_TYPES, &String::from(Self::KEY_UPPER_CHARACTER), false),
-        ]);
-        IdbKeyRange::bound(&lower.into(), &upper.into()).expect("construct key range")
+        room_id: &RoomId,
+        related_event_id: &EventId,
+    ) -> Result<IdbKeyRange, IndexeddbEventCacheStoreError> {
+        use serde_wasm_bindgen::to_value;
+        let lower = to_value(
+            &self.encode_lower_event_relation_key_for_related_event(room_id, related_event_id),
+        )?;
+        let upper = to_value(
+            &self.encode_upper_event_relation_key_for_related_event(room_id, related_event_id),
+        )?;
+        Ok(IdbKeyRange::bound(&lower, &upper).expect("construct key range"))
     }
 
     pub fn serialize_in_band_event(
         &self,
+        room_id: &RoomId,
         event: &InBandEvent,
     ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
         let event_id = event.content.event_id().ok_or(IndexeddbEventCacheStoreError::NoEventId)?;
-        let id = self.encode_event_id_key(&event.room_id, &event_id);
-        let position = self.encode_event_position_key(&event.room_id, &event.position);
+        let id = self.encode_event_id_key(room_id, &event_id);
+        let position = self.encode_event_position_key(room_id, &event.position);
         let relation = event.relation().map(|(related_event, relation_type)| {
             self.encode_event_relation_key(
-                &event.room_id,
+                room_id,
                 &related_event,
                 &RelationType::from(relation_type),
             )
@@ -272,13 +298,14 @@ impl IndexeddbEventCacheStoreSerializer {
 
     pub fn serialize_out_of_band_event(
         &self,
+        room_id: &RoomId,
         event: &OutOfBandEvent,
     ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
         let event_id = event.content.event_id().ok_or(IndexeddbEventCacheStoreError::NoEventId)?;
-        let id = self.encode_event_id_key(&event.room_id, &event_id);
+        let id = self.encode_event_id_key(room_id, &event_id);
         let relation = event.relation().map(|(related_event, relation_type)| {
             self.encode_event_relation_key(
-                &event.room_id,
+                room_id,
                 &related_event,
                 &RelationType::from(relation_type),
             )
@@ -291,10 +318,14 @@ impl IndexeddbEventCacheStoreSerializer {
         })?)
     }
 
-    pub fn serialize_event(&self, event: &Event) -> Result<JsValue, IndexeddbEventCacheStoreError> {
+    pub fn serialize_event(
+        &self,
+        room_id: &RoomId,
+        event: &Event,
+    ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
         match event {
-            Event::InBand(i) => self.serialize_in_band_event(i),
-            Event::OutOfBand(o) => self.serialize_out_of_band_event(o),
+            Event::InBand(i) => self.serialize_in_band_event(room_id, i),
+            Event::OutOfBand(o) => self.serialize_out_of_band_event(room_id, o),
         }
     }
 
