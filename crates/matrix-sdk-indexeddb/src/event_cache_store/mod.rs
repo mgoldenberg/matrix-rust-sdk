@@ -162,21 +162,32 @@ impl IndexeddbEventCacheStore {
             .map_err(Into::into)
     }
 
-    async fn get_all_events_by_id<K: wasm_bindgen::JsCast>(
+    async fn get_all_events_by_id_with_transaction<K: wasm_bindgen::JsCast>(
         &self,
+        transaction: &IdbTransaction<'_>,
         key: &K,
     ) -> Result<Vec<types::Event>, IndexeddbEventCacheStoreError> {
         let mut events = Vec::new();
-        let values = self
-            .inner
-            .transaction_on_one_with_mode(keys::EVENTS, IdbTransactionMode::Readonly)?
-            .object_store(keys::EVENTS)?
-            .get_all_with_key(key)?
-            .await?;
+        let values = transaction.object_store(keys::EVENTS)?.get_all_with_key(key)?.await?;
         for value in values {
             events.push(self.serializer.deserialize_event(value)?);
         }
         Ok(events)
+    }
+
+    async fn get_event_by_id_with_transaction(
+        &self,
+        transaction: &IdbTransaction<'_>,
+        room_id: &RoomId,
+        event_id: &EventId,
+    ) -> Result<Option<types::Event>, IndexeddbEventCacheStoreError> {
+        let key =
+            serde_wasm_bindgen::to_value(&self.serializer.encode_event_id_key(room_id, event_id))?;
+        let mut events = self.get_all_events_by_id_with_transaction(transaction, &key).await?;
+        if events.len() > 1 {
+            return Err(IndexeddbEventCacheStoreError::DuplicateEventId);
+        }
+        Ok(events.pop())
     }
 
     async fn get_event_by_id(
@@ -184,23 +195,18 @@ impl IndexeddbEventCacheStore {
         room_id: &RoomId,
         event_id: &EventId,
     ) -> Result<Option<types::Event>, IndexeddbEventCacheStoreError> {
-        let key =
-            serde_wasm_bindgen::to_value(&self.serializer.encode_event_id_key(room_id, event_id))?;
-        let mut events = self.get_all_events_by_id(&key).await?;
-        if events.len() > 1 {
-            return Err(IndexeddbEventCacheStoreError::DuplicateEventId);
-        }
-        Ok(events.pop())
+        let transaction =
+            self.inner.transaction_on_one_with_mode(keys::EVENTS, IdbTransactionMode::Readonly)?;
+        self.get_event_by_id_with_transaction(&transaction, room_id, event_id).await
     }
 
-    async fn get_all_events_by_relation_range<K: wasm_bindgen::JsCast>(
+    async fn get_all_events_by_relation_range_with_transaction<K: wasm_bindgen::JsCast>(
         &self,
+        transaction: &IdbTransaction<'_>,
         key: &K,
     ) -> Result<Vec<types::Event>, IndexeddbEventCacheStoreError> {
         let mut events = Vec::new();
-        let values = self
-            .inner
-            .transaction_on_one_with_mode(keys::EVENTS, IdbTransactionMode::Readonly)?
+        let values = transaction
             .object_store(keys::EVENTS)?
             .index(keys::EVENT_RELATIONS)?
             .get_all_with_key(key)?
@@ -211,8 +217,18 @@ impl IndexeddbEventCacheStore {
         Ok(events)
     }
 
-    async fn get_all_events_by_relation(
+    async fn get_all_events_by_relation_range<K: wasm_bindgen::JsCast>(
         &self,
+        key: &K,
+    ) -> Result<Vec<types::Event>, IndexeddbEventCacheStoreError> {
+        let transaction =
+            self.inner.transaction_on_one_with_mode(keys::EVENTS, IdbTransactionMode::Readonly)?;
+        self.get_all_events_by_relation_range_with_transaction(&transaction, key).await
+    }
+
+    async fn get_all_events_by_relation_with_transaction(
+        &self,
+        transaction: &IdbTransaction<'_>,
         room_id: &RoomId,
         related_event_id: &EventId,
         relation_type: &RelationType,
@@ -222,7 +238,7 @@ impl IndexeddbEventCacheStore {
             related_event_id,
             relation_type,
         ))?;
-        self.get_all_events_by_relation_range(&key).await
+        self.get_all_events_by_relation_range_with_transaction(transaction, &key).await
     }
 
     async fn get_all_events_by_related_event(
@@ -938,10 +954,13 @@ impl_event_cache_store! {
             return Ok(Vec::new());
         }
 
+        let transaction =
+            self.inner.transaction_on_one_with_mode(keys::EVENTS, IdbTransactionMode::Readonly)?;
+
         let mut duplicated = Vec::new();
         for event_id in events {
             if let Some(types::Event::InBand(event)) =
-                self.get_event_by_id(room_id, &event_id).await?
+                self.get_event_by_id_with_transaction(&transaction, room_id, &event_id).await?
             {
                 duplicated.push((event_id, event.position.into()));
             }
@@ -971,10 +990,19 @@ impl_event_cache_store! {
         let mut events = Vec::new();
         match filter {
             Some(relation_types) if !relation_types.is_empty() => {
+                let transaction = self
+                    .inner
+                    .transaction_on_one_with_mode(keys::EVENTS, IdbTransactionMode::Readonly)?;
                 for relation_type in relation_types {
-                    for event in
-                        self.get_all_events_by_relation(room_id, event_id, relation_type).await?
-                    {
+                    let result = self
+                        .get_all_events_by_relation_with_transaction(
+                            &transaction,
+                            room_id,
+                            event_id,
+                            relation_type,
+                        )
+                        .await?;
+                    for event in result {
                         events.push(event.take_content());
                     }
                 }
@@ -1005,18 +1033,21 @@ impl_event_cache_store! {
             error!(%room_id, "Trying to save an event with no ID");
             return Ok(());
         };
-        let event = match self.get_event_by_id(room_id, &event_id).await? {
-            Some(mut inner) => {
-                let _ = inner.replace_content(event);
-                inner
-            }
-            None => types::Event::OutOfBand(OutOfBandEvent { content: event, position: () }),
-        };
+
+        let transaction = self
+            .inner
+            .transaction_on_multi_with_mode(&[keys::EVENTS], IdbTransactionMode::Readwrite)?;
+
+        let event =
+            match self.get_event_by_id_with_transaction(&transaction, room_id, &event_id).await? {
+                Some(mut inner) => {
+                    let _ = inner.replace_content(event);
+                    inner
+                }
+                None => types::Event::OutOfBand(OutOfBandEvent { content: event, position: () }),
+            };
         let value = self.serializer.serialize_event(room_id, &event)?;
-        self.inner
-            .transaction_on_multi_with_mode(&[keys::EVENTS], IdbTransactionMode::Readwrite)?
-            .object_store(keys::EVENTS)?
-            .put_val_owned(value)?;
+        transaction.object_store(keys::EVENTS)?.put_val_owned(value)?;
         Ok(())
     }
 
