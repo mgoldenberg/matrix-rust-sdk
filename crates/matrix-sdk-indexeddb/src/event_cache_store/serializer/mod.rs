@@ -26,9 +26,10 @@ use crate::{
         keys,
         serializer::types::{
             IndexedChunk, IndexedChunkIdKey, IndexedEvent, IndexedEventIdKey,
-            IndexedEventPositionKey, IndexedEventRelationKey, IndexedNextChunkIdKey, ValueWithId,
+            IndexedEventPositionKey, IndexedEventRelationKey, IndexedGap, IndexedGapIdKey,
+            IndexedNextChunkIdKey,
         },
-        types::{Chunk, Event, GenericEvent, InBandEvent, OutOfBandEvent, Position},
+        types::{Chunk, Event, Gap, GenericEvent, InBandEvent, OutOfBandEvent, Position},
     },
     serializer::IndexeddbSerializer,
     IndexeddbEventCacheStoreError,
@@ -40,7 +41,6 @@ pub struct IndexeddbEventCacheStoreSerializer {
 }
 
 impl IndexeddbEventCacheStoreSerializer {
-    pub const KEY_SEPARATOR: char = '\u{001D}';
     pub const KEY_LOWER_CHARACTER: char = '\u{0000}';
     pub const KEY_UPPER_CHARACTER: char = '\u{FFFF}';
 
@@ -48,69 +48,11 @@ impl IndexeddbEventCacheStoreSerializer {
         Self { inner }
     }
 
-    /// Encodes each tuple in `parts` as a key and then joins them with
-    /// `Self::KEY_SEPARATOR`.
-    ///
-    /// Each tuple is composed of three fields.
-    ///
-    /// - `&str` - name of an object store
-    /// - `&str` - key of an object in the object store
-    /// - `bool` - whether to encrypt the fields above in the final key
-    ///
-    /// Selective encryption is employed to maintain ordering, so that range
-    /// queries are possible.
-    pub fn encode_key(&self, parts: Vec<(&str, &str, bool)>) -> String {
-        let mut end_key = String::new();
-        for (i, (table_name, key, should_encrypt)) in parts.into_iter().enumerate() {
-            if i > 0 {
-                end_key.push(Self::KEY_SEPARATOR);
-            }
-            let encoded_key = if should_encrypt {
-                self.inner.encode_key_as_string(table_name, key)
-            } else {
-                key.to_owned()
-            };
-            end_key.push_str(&encoded_key);
-        }
-        end_key
-    }
-
     pub fn serialize_value(
         &self,
         value: &impl Serialize,
     ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
         self.inner.serialize_value(value).map_err(Into::into)
-    }
-
-    /// Serializes `value` and wraps it with a `ValueWithId` using `id`.
-    ///
-    /// This helps to ensure that values are well-formed before putting them
-    /// into an object store, as each of the object stores uses `id` as its key
-    /// path.
-    pub fn serialize_value_with_id(
-        &self,
-        id: &str,
-        value: &impl Serialize,
-    ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
-        let serialized = self.inner.maybe_encrypt_value(value)?;
-        let res_obj = ValueWithId { id: id.to_owned(), value: serialized };
-        Ok(serde_wasm_bindgen::to_value(&res_obj)?)
-    }
-
-    /// Deserializes a `value` as a `ValueWithId` and then returns the result of
-    /// deserializing the inner `value`.
-    ///
-    /// The corresponding serialization function, `serialize_value_with_id`
-    /// helps to ensure that values are well-formed before putting them into
-    /// an object store, as each of the object stores uses `id` as its key
-    /// path.
-    pub fn deserialize_value_with_id<T: DeserializeOwned>(
-        &self,
-        value: JsValue,
-    ) -> Result<T, IndexeddbEventCacheStoreError> {
-        let obj: ValueWithId = value.into_serde()?;
-        let deserialized: T = self.inner.maybe_decrypt_value(obj.value)?;
-        Ok(deserialized)
     }
 
     pub fn encode_chunk_id_key(
@@ -381,6 +323,32 @@ impl IndexeddbEventCacheStoreSerializer {
         value: JsValue,
     ) -> Result<Chunk, IndexeddbEventCacheStoreError> {
         let indexed: IndexedChunk = value.into_serde()?;
+        self.inner.maybe_decrypt_value(indexed.content).map_err(Into::into)
+    }
+
+    pub fn encode_gap_id_key(
+        &self,
+        room_id: &RoomId,
+        chunk_id: &ChunkIdentifier,
+    ) -> IndexedGapIdKey {
+        let room_id = self.inner.encode_key_as_string(keys::ROOMS, room_id);
+        IndexedGapIdKey::new(room_id, chunk_id.index())
+    }
+
+    pub fn serialize_gap(
+        &self,
+        room_id: &RoomId,
+        chunk_id: &ChunkIdentifier,
+        gap: &Gap,
+    ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
+        Ok(serde_wasm_bindgen::to_value(&IndexedGap {
+            id: self.encode_gap_id_key(room_id, chunk_id),
+            content: self.inner.maybe_encrypt_value(gap)?,
+        })?)
+    }
+
+    pub fn deserialize_gap(&self, value: JsValue) -> Result<Gap, IndexeddbEventCacheStoreError> {
+        let indexed: IndexedGap = value.into_serde()?;
         self.inner.maybe_decrypt_value(indexed.content).map_err(Into::into)
     }
 }

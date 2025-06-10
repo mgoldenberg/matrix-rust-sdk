@@ -94,6 +94,10 @@ pub enum IndexeddbEventCacheStoreError {
     NoEventId,
     #[error("duplicate event id")]
     DuplicateEventId,
+    #[error("duplicate gap id")]
+    DuplicateGapId,
+    #[error("gap not found")]
+    GapNotFound,
     #[error("media store: {0}")]
     MediaStore(#[from] EventCacheStoreError),
 }
@@ -263,17 +267,6 @@ impl IndexeddbEventCacheStore {
             .collect())
     }
 
-    async fn get_all_timeline_events_by_chunk(
-        &self,
-        room_id: &RoomId,
-        chunk_id: u64,
-    ) -> Result<Vec<TimelineEvent>, IndexeddbEventCacheStoreError> {
-        let transaction =
-            self.inner.transaction_on_one_with_mode(keys::EVENTS, IdbTransactionMode::Readonly)?;
-        self.get_all_timeline_events_by_chunk_with_transaction(&transaction, room_id, chunk_id)
-            .await
-    }
-
     async fn get_chunk_with_max_id_in_room_with_transaction(
         &self,
         transaction: &IdbTransaction<'_>,
@@ -383,17 +376,6 @@ impl IndexeddbEventCacheStore {
         Ok(chunks.pop())
     }
 
-    async fn get_chunk_by_id(
-        &self,
-        room_id: &RoomId,
-        chunk_id: &ChunkIdentifier,
-    ) -> Result<Option<types::Chunk>, IndexeddbEventCacheStoreError> {
-        let transaction = self
-            .inner
-            .transaction_on_one_with_mode(keys::LINKED_CHUNKS, IdbTransactionMode::Readonly)?;
-        self.get_chunk_by_id_with_transaction(&transaction, room_id, chunk_id).await
-    }
-
     async fn get_all_chunks_in_room_with_transaction(
         &self,
         transaction: &IdbTransaction<'_>,
@@ -404,16 +386,6 @@ impl IndexeddbEventCacheStore {
             &self.serializer.encode_chunk_id_range_for_room(room_id)?,
         )
         .await
-    }
-
-    async fn get_all_chunks_in_room(
-        &self,
-        room_id: &RoomId,
-    ) -> Result<Vec<types::Chunk>, IndexeddbEventCacheStoreError> {
-        let transaction = self
-            .inner
-            .transaction_on_one_with_mode(keys::LINKED_CHUNKS, IdbTransactionMode::Readonly)?;
-        self.get_all_chunks_in_room_with_transaction(&transaction, room_id).await
     }
 
     async fn add_chunk_with_transaction(
@@ -513,6 +485,48 @@ impl IndexeddbEventCacheStore {
         self.delete_chunk_by_id_with_transaction(&transaction, room_id, id).await?;
         transaction.await.into_result().map_err(Into::into)
     }
+
+    async fn get_all_gaps_by_id_with_transaction<K: wasm_bindgen::JsCast>(
+        &self,
+        transaction: &IdbTransaction<'_>,
+        key: &K,
+    ) -> Result<Vec<types::Gap>, IndexeddbEventCacheStoreError> {
+        let mut gaps = Vec::new();
+        let values = transaction.object_store(keys::GAPS)?.get_all_with_key(key)?.await?;
+        for value in values {
+            gaps.push(self.serializer.deserialize_gap(value)?);
+        }
+        Ok(gaps)
+    }
+
+    async fn get_gap_by_id_with_transaction(
+        &self,
+        transaction: &IdbTransaction<'_>,
+        room_id: &RoomId,
+        chunk_id: &ChunkIdentifier,
+    ) -> Result<Option<types::Gap>, IndexeddbEventCacheStoreError> {
+        let key =
+            serde_wasm_bindgen::to_value(&self.serializer.encode_gap_id_key(room_id, chunk_id))?;
+        let mut gaps = self.get_all_gaps_by_id_with_transaction(transaction, &key).await?;
+        if gaps.len() > 1 {
+            return Err(IndexeddbEventCacheStoreError::DuplicateGapId);
+        }
+        Ok(gaps.pop())
+    }
+
+    async fn add_gap_with_transaction(
+        &self,
+        transaction: &IdbTransaction<'_>,
+        room_id: &RoomId,
+        chunk_id: &ChunkIdentifier,
+        gap: &types::Gap,
+    ) -> Result<(), IndexeddbEventCacheStoreError> {
+        transaction
+            .object_store(keys::GAPS)?
+            .add_val_owned(self.serializer.serialize_gap(room_id, chunk_id, gap)?)?
+            .await?;
+        Ok(())
+    }
 }
 
 // Small hack to have the following macro invocation act as the appropriate
@@ -600,7 +614,6 @@ impl_event_cache_store! {
         )?;
 
         let linked_chunks = tx.object_store(keys::LINKED_CHUNKS)?;
-        let gaps = tx.object_store(keys::GAPS)?;
         let events = tx.object_store(keys::EVENTS)?;
         let event_positions = events.index(keys::EVENT_POSITIONS)?;
 
@@ -617,15 +630,9 @@ impl_event_cache_store! {
                 }
                 Update::NewGapChunk { previous, new, next, gap } => {
                     trace!(%room_id, "Inserting new gap (prev={previous:?}, new={new:?}, next={next:?})");
-
-                    let gap_id = self.serializer.encode_key(vec![
-                        (keys::ROOMS, room_id.as_ref(), true),
-                        (keys::LINKED_CHUNKS, &new.index().to_string(), false),
-                    ]);
-                    let gap = types::Gap { prev_token: gap.prev_token };
-                    let serialized_gap = self.serializer.serialize_value_with_id(&gap_id, &gap)?;
-                    gaps.add_val_owned(serialized_gap)?;
-
+                    self.add_gap_with_transaction(&tx, room_id, &new, &types::Gap {
+                        prev_token: gap.prev_token
+                    }).await?;
                     self.add_chunk_with_transaction(&tx, room_id, &types::Chunk {
                         identifier: new.index(),
                         previous: previous.map(|i| i.index()),
@@ -726,28 +733,27 @@ impl_event_cache_store! {
         &self,
         room_id: &RoomId,
     ) -> Result<Vec<RawChunk<Event, Gap>>, IndexeddbEventCacheStoreError> {
+        let transaction = self.inner.transaction_on_multi_with_mode(
+            &[keys::LINKED_CHUNKS, keys::GAPS, keys::EVENTS],
+            IdbTransactionMode::Readwrite,
+        )?;
+
         let mut result = Vec::new();
-        let chunks = self.get_all_chunks_in_room(room_id).await?;
+        let chunks = self.get_all_chunks_in_room_with_transaction(&transaction, room_id).await?;
         for chunk in chunks {
             let content = match chunk.chunk_type {
                 ChunkType::Event => {
-                    ChunkContent::Items(self.get_all_timeline_events_by_chunk(room_id.as_ref(), chunk.identifier).await?)
+                    let events = self
+                        .get_all_timeline_events_by_chunk_with_transaction(&transaction, room_id, chunk.identifier)
+                        .await?;
+                    ChunkContent::Items(events)
                 }
                 ChunkType::Gap => {
-                    let gap_id = self.serializer.encode_key(vec![
-                        (keys::ROOMS, room_id.as_ref(), true),
-                        (keys::LINKED_CHUNKS, &chunk.identifier.to_string(), false),
-                    ]);
                     let gap = self
-                        .inner
-                        .transaction_on_one_with_mode(keys::GAPS, IdbTransactionMode::Readonly)?
-                        .object_store(keys::GAPS)?
-                        .get_owned(gap_id)?
+                        .get_gap_by_id_with_transaction(&transaction, room_id, &ChunkIdentifier::new(chunk.identifier))
                         .await?
-                        .unwrap();
-                    let gap: types::Gap = self.serializer.deserialize_value_with_id(gap)?;
-                    let gap = Gap { prev_token: gap.prev_token };
-                    ChunkContent::Gap(gap)
+                        .ok_or(IndexeddbEventCacheStoreError::GapNotFound)?;
+                    ChunkContent::Gap(Gap { prev_token: gap.prev_token })
                 }
             };
             let raw_chunk = RawChunk {
@@ -786,16 +792,10 @@ impl_event_cache_store! {
                         ChunkContent::Items(events)
                     }
                     ChunkType::Gap => {
-                        let gap_id = self.serializer.encode_key(vec![
-                            (keys::ROOMS, room_id.as_ref(), true),
-                            (keys::LINKED_CHUNKS, &last_chunk.identifier.to_string(), false),
-                        ]);
-                        let gap = transaction
-                            .object_store(keys::GAPS)?
-                            .get_owned(gap_id)?
+                        let gap = self
+                            .get_gap_by_id_with_transaction(&transaction, room_id, &ChunkIdentifier::new(last_chunk.identifier))
                             .await?
-                            .unwrap();
-                        let gap: types::Gap = self.serializer.deserialize_value_with_id(gap)?;
+                            .ok_or(IndexeddbEventCacheStoreError::GapNotFound)?;
                         ChunkContent::Gap(Gap { prev_token: gap.prev_token })
                     }
                 };
@@ -826,27 +826,22 @@ impl_event_cache_store! {
         room_id: &RoomId,
         before_chunk_identifier: ChunkIdentifier,
     ) -> Result<Option<RawChunk<Event, Gap>>, IndexeddbEventCacheStoreError> {
-        if let Some(chunk) = self.get_chunk_by_id(room_id, &before_chunk_identifier).await? {
+        let transaction = self
+            .inner
+            .transaction_on_multi_with_mode(&[keys::LINKED_CHUNKS, keys::EVENTS, keys::GAPS], IdbTransactionMode::Readonly)?;
+        if let Some(chunk) = self.get_chunk_by_id_with_transaction(&transaction, room_id, &before_chunk_identifier).await? {
             if let Some(previous_identifier) = chunk.previous {
-                if let Some(previous_chunk) = self.get_chunk_by_id(room_id, &ChunkIdentifier::new(previous_identifier)).await? {
+                if let Some(previous_chunk) = self.get_chunk_by_id_with_transaction(&transaction, room_id, &ChunkIdentifier::new(previous_identifier)).await? {
                     let content = match previous_chunk.chunk_type {
                         ChunkType::Event => {
-                            let events = self.get_all_timeline_events_by_chunk(room_id.as_ref(), previous_chunk.identifier).await?;
+                            let events = self.get_all_timeline_events_by_chunk_with_transaction(&transaction, room_id.as_ref(), previous_chunk.identifier).await?;
                             ChunkContent::Items(events)
                         }
                         ChunkType::Gap => {
-                            let gap_id = self.serializer.encode_key(vec![
-                                (keys::ROOMS, room_id.as_ref(), true),
-                                (keys::LINKED_CHUNKS, &previous_identifier.to_string(), false),
-                            ]);
                             let gap = self
-                                .inner
-                                .transaction_on_one_with_mode(keys::GAPS, IdbTransactionMode::Readonly)?
-                                .object_store(keys::GAPS)?
-                                .get_owned(gap_id)?
+                                .get_gap_by_id_with_transaction(&transaction, room_id, &ChunkIdentifier::new(previous_chunk.identifier))
                                 .await?
-                                .unwrap();
-                            let gap: types::Gap = self.serializer.deserialize_value_with_id(gap)?;
+                                .ok_or(IndexeddbEventCacheStoreError::GapNotFound)?;
                             ChunkContent::Gap(Gap { prev_token: gap.prev_token })
                         }
                     };
@@ -1336,18 +1331,6 @@ mod tests {
         assert_matches!(c.content, ChunkContent::Gap(gap) => {
             assert_eq!(gap.prev_token, "tartiflette");
         });
-
-        // TODO: Is this necessary?
-        // Check that cascading worked.
-        let mut chunk_ids = store
-            .get_all_chunks_in_room(room_id)
-            .await
-            .unwrap()
-            .iter()
-            .map(|chunk| chunk.identifier)
-            .collect::<Vec<_>>();
-        chunk_ids.sort();
-        assert_eq!(chunk_ids, vec![42, 44]);
     }
 
     async fn test_linked_chunk_push_items(store: IndexeddbEventCacheStore) {
