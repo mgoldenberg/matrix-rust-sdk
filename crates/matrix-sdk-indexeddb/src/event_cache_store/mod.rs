@@ -584,24 +584,38 @@ impl_event_cache_store! {
             match update {
                 Update::NewItemsChunk { previous, new, next } => {
                     trace!(%room_id, "Inserting new chunk (prev={previous:?}, new={new:?}, next={next:?})");
-                    self.add_chunk_with_transaction(&tx, room_id, &types::Chunk {
-                        identifier: new.index(),
-                        previous: previous.map(|i| i.index()),
-                        next: next.map(|i| i.index()),
-                        chunk_type: ChunkType::Event,
-                    }).await?;
+                    self.add_chunk_with_transaction(
+                        &tx,
+                        room_id,
+                        &types::Chunk {
+                            identifier: new.index(),
+                            previous: previous.map(|i| i.index()),
+                            next: next.map(|i| i.index()),
+                            chunk_type: ChunkType::Event,
+                        },
+                    )
+                    .await?;
                 }
                 Update::NewGapChunk { previous, new, next, gap } => {
                     trace!(%room_id, "Inserting new gap (prev={previous:?}, new={new:?}, next={next:?})");
-                    self.add_gap_with_transaction(&tx, room_id, &new, &types::Gap {
-                        prev_token: gap.prev_token
-                    }).await?;
-                    self.add_chunk_with_transaction(&tx, room_id, &types::Chunk {
-                        identifier: new.index(),
-                        previous: previous.map(|i| i.index()),
-                        next: next.map(|i| i.index()),
-                        chunk_type: ChunkType::Gap,
-                    }).await?;
+                    self.add_gap_with_transaction(
+                        &tx,
+                        room_id,
+                        &new,
+                        &types::Gap { prev_token: gap.prev_token },
+                    )
+                    .await?;
+                    self.add_chunk_with_transaction(
+                        &tx,
+                        room_id,
+                        &types::Chunk {
+                            identifier: new.index(),
+                            previous: previous.map(|i| i.index()),
+                            next: next.map(|i| i.index()),
+                            chunk_type: ChunkType::Gap,
+                        },
+                    )
+                    .await?;
                 }
                 Update::RemoveChunk(id) => {
                     trace!("Removing chunk {id:?}");
@@ -613,12 +627,16 @@ impl_event_cache_store! {
                     trace!(%room_id, "pushing {} items @ {chunk_identifier}", items.len());
 
                     for (i, item) in items.into_iter().enumerate() {
-                        let value = self.serializer.serialize_in_band_event(room_id, &InBandEvent {
-                            content: item,
-                            position: types::Position {
-                                chunk_identifier, index: at.index() + i,
+                        let value = self.serializer.serialize_in_band_event(
+                            room_id,
+                            &InBandEvent {
+                                content: item,
+                                position: types::Position {
+                                    chunk_identifier,
+                                    index: at.index() + i,
+                                },
                             },
-                        })?;
+                        )?;
                         events.put_val(&value)?.into_future().await?;
                     }
                 }
@@ -629,16 +647,18 @@ impl_event_cache_store! {
                     trace!(%room_id, "replacing item @ {chunk_id}:{index}");
 
                     // First remove the event in the given position, if it exists
-                    let key = self.serializer.encode_event_position_key_as_value(room_id.as_ref(), &at.into())?;
+                    let key = self
+                        .serializer
+                        .encode_event_position_key_as_value(room_id.as_ref(), &at.into())?;
                     if let Some(cursor) = event_positions.open_cursor_with_range(&key)?.await? {
                         cursor.delete()?.await?;
                     }
 
                     // Then put the new event in the given position
-                    let value = self.serializer.serialize_in_band_event(room_id, &InBandEvent {
-                        content: item,
-                        position: at.into(),
-                    })?;
+                    let value = self.serializer.serialize_in_band_event(
+                        room_id,
+                        &InBandEvent { content: item, position: at.into() },
+                    )?;
                     events.put_val(&value)?.await?;
                 }
                 Update::RemoveItem { at } => {
@@ -647,7 +667,9 @@ impl_event_cache_store! {
 
                     trace!(%room_id, "removing item @ {chunk_id}:{index}");
 
-                    let key = self.serializer.encode_event_position_key_as_value(room_id.as_ref(), &at.into())?;
+                    let key = self
+                        .serializer
+                        .encode_event_position_key_as_value(room_id.as_ref(), &at.into())?;
                     if let Some(cursor) = event_positions.open_cursor_with_range(&key)?.await? {
                         cursor.delete()?.await?;
                     }
@@ -658,10 +680,15 @@ impl_event_cache_store! {
 
                     trace!(%room_id, "detaching last items @ {chunk_id}:{index}");
 
-                    let key_range = self.serializer.encode_event_position_range_for_chunk_from(room_id.as_ref(), &at.into())?;
-                    if let Some(cursor) = event_positions.open_cursor_with_range(&key_range)?.await? {
+                    let key_range = self
+                        .serializer
+                        .encode_event_position_range_for_chunk_from(room_id.as_ref(), &at.into())?;
+                    if let Some(cursor) =
+                        event_positions.open_cursor_with_range(&key_range)?.await?
+                    {
                         while cursor.key().is_some() {
-                            let event: InBandEvent = self.serializer.deserialize_in_band_event(cursor.value())?;
+                            let event: InBandEvent =
+                                self.serializer.deserialize_in_band_event(cursor.value())?;
                             if event.position.index >= index {
                                 cursor.delete()?.await?;
                             }
@@ -677,9 +704,18 @@ impl_event_cache_store! {
                     let chunks = self.get_all_chunks_in_room_with_transaction(&tx, room_id).await?;
                     for chunk in chunks {
                         // Delete all events for this chunk
-                        let events_key_range = self.serializer.encode_event_position_range_for_chunk(room_id.as_ref(), chunk.identifier)?;
+                        let events_key_range =
+                            self.serializer.encode_event_position_range_for_chunk(
+                                room_id.as_ref(),
+                                chunk.identifier,
+                            )?;
                         events.delete_owned(events_key_range)?;
-                        linked_chunks.delete_owned(self.serializer.encode_chunk_id_key_as_value(room_id, &ChunkIdentifier::new(chunk.identifier))?)?;
+                        linked_chunks.delete_owned(
+                            self.serializer.encode_chunk_id_key_as_value(
+                                room_id,
+                                &ChunkIdentifier::new(chunk.identifier),
+                            )?,
+                        )?;
                     }
                 }
             }
@@ -707,13 +743,21 @@ impl_event_cache_store! {
             let content = match chunk.chunk_type {
                 ChunkType::Event => {
                     let events = self
-                        .get_all_timeline_events_by_chunk_with_transaction(&transaction, room_id, chunk.identifier)
+                        .get_all_timeline_events_by_chunk_with_transaction(
+                            &transaction,
+                            room_id,
+                            chunk.identifier,
+                        )
                         .await?;
                     ChunkContent::Items(events)
                 }
                 ChunkType::Gap => {
                     let gap = self
-                        .get_gap_by_id_with_transaction(&transaction, room_id, &ChunkIdentifier::new(chunk.identifier))
+                        .get_gap_by_id_with_transaction(
+                            &transaction,
+                            room_id,
+                            &ChunkIdentifier::new(chunk.identifier),
+                        )
                         .await?
                         .ok_or(IndexeddbEventCacheStoreError::GapNotFound)?;
                     ChunkContent::Gap(Gap { prev_token: gap.prev_token })
@@ -741,22 +785,31 @@ impl_event_cache_store! {
         (Option<RawChunk<Event, Gap>>, ChunkIdentifierGenerator),
         IndexeddbEventCacheStoreError,
     > {
-        let transaction = self
-            .inner
-            .transaction_on_multi_with_mode(&[keys::LINKED_CHUNKS, keys::EVENTS, keys::GAPS], IdbTransactionMode::Readonly)?;
+        let transaction = self.inner.transaction_on_multi_with_mode(
+            &[keys::LINKED_CHUNKS, keys::EVENTS, keys::GAPS],
+            IdbTransactionMode::Readonly,
+        )?;
         match self.get_last_chunk_in_room_with_transaction(&transaction, room_id).await? {
             None => Ok((None, ChunkIdentifierGenerator::new_from_scratch())),
             Some(last_chunk) => {
                 let content = match last_chunk.chunk_type {
                     ChunkType::Event => {
                         let events = self
-                            .get_all_timeline_events_by_chunk_with_transaction(&transaction, room_id.as_ref(), last_chunk.identifier)
+                            .get_all_timeline_events_by_chunk_with_transaction(
+                                &transaction,
+                                room_id.as_ref(),
+                                last_chunk.identifier,
+                            )
                             .await?;
                         ChunkContent::Items(events)
                     }
                     ChunkType::Gap => {
                         let gap = self
-                            .get_gap_by_id_with_transaction(&transaction, room_id, &ChunkIdentifier::new(last_chunk.identifier))
+                            .get_gap_by_id_with_transaction(
+                                &transaction,
+                                room_id,
+                                &ChunkIdentifier::new(last_chunk.identifier),
+                            )
                             .await?
                             .ok_or(IndexeddbEventCacheStoreError::GapNotFound)?;
                         ChunkContent::Gap(Gap { prev_token: gap.prev_token })
@@ -773,7 +826,8 @@ impl_event_cache_store! {
                     .await?
                     .map(|chunk| ChunkIdentifier::new(chunk.identifier))
                     .ok_or(IndexeddbEventCacheStoreError::NoMaxChunkId)?;
-                let generator = ChunkIdentifierGenerator::new_from_previous_chunk_identifier(max_chunk_id);
+                let generator =
+                    ChunkIdentifierGenerator::new_from_previous_chunk_identifier(max_chunk_id);
                 Ok((Some(raw_chunk), generator))
             }
         }
@@ -789,20 +843,41 @@ impl_event_cache_store! {
         room_id: &RoomId,
         before_chunk_identifier: ChunkIdentifier,
     ) -> Result<Option<RawChunk<Event, Gap>>, IndexeddbEventCacheStoreError> {
-        let transaction = self
-            .inner
-            .transaction_on_multi_with_mode(&[keys::LINKED_CHUNKS, keys::EVENTS, keys::GAPS], IdbTransactionMode::Readonly)?;
-        if let Some(chunk) = self.get_chunk_by_id_with_transaction(&transaction, room_id, &before_chunk_identifier).await? {
+        let transaction = self.inner.transaction_on_multi_with_mode(
+            &[keys::LINKED_CHUNKS, keys::EVENTS, keys::GAPS],
+            IdbTransactionMode::Readonly,
+        )?;
+        if let Some(chunk) = self
+            .get_chunk_by_id_with_transaction(&transaction, room_id, &before_chunk_identifier)
+            .await?
+        {
             if let Some(previous_identifier) = chunk.previous {
-                if let Some(previous_chunk) = self.get_chunk_by_id_with_transaction(&transaction, room_id, &ChunkIdentifier::new(previous_identifier)).await? {
+                if let Some(previous_chunk) = self
+                    .get_chunk_by_id_with_transaction(
+                        &transaction,
+                        room_id,
+                        &ChunkIdentifier::new(previous_identifier),
+                    )
+                    .await?
+                {
                     let content = match previous_chunk.chunk_type {
                         ChunkType::Event => {
-                            let events = self.get_all_timeline_events_by_chunk_with_transaction(&transaction, room_id.as_ref(), previous_chunk.identifier).await?;
+                            let events = self
+                                .get_all_timeline_events_by_chunk_with_transaction(
+                                    &transaction,
+                                    room_id.as_ref(),
+                                    previous_chunk.identifier,
+                                )
+                                .await?;
                             ChunkContent::Items(events)
                         }
                         ChunkType::Gap => {
                             let gap = self
-                                .get_gap_by_id_with_transaction(&transaction, room_id, &ChunkIdentifier::new(previous_chunk.identifier))
+                                .get_gap_by_id_with_transaction(
+                                    &transaction,
+                                    room_id,
+                                    &ChunkIdentifier::new(previous_chunk.identifier),
+                                )
                                 .await?
                                 .ok_or(IndexeddbEventCacheStoreError::GapNotFound)?;
                             ChunkContent::Gap(Gap { prev_token: gap.prev_token })
@@ -865,7 +940,9 @@ impl_event_cache_store! {
 
         let mut duplicated = Vec::new();
         for event_id in events {
-            if let Some(types::Event::InBand(event)) = self.get_event_by_id(room_id, &event_id).await? {
+            if let Some(types::Event::InBand(event)) =
+                self.get_event_by_id(room_id, &event_id).await?
+            {
                 duplicated.push((event_id, event.position.into()));
             }
         }
@@ -878,9 +955,7 @@ impl_event_cache_store! {
         room_id: &RoomId,
         event_id: &EventId,
     ) -> Result<Option<Event>, IndexeddbEventCacheStoreError> {
-        self.get_event_by_id(room_id, event_id)
-            .await
-            .map(|ok| ok.map(|some| some.take_content()))
+        self.get_event_by_id(room_id, event_id).await.map(|ok| ok.map(|some| some.take_content()))
     }
 
     /// Find all the events that relate to a given event.
@@ -897,7 +972,9 @@ impl_event_cache_store! {
         match filter {
             Some(relation_types) if !relation_types.is_empty() => {
                 for relation_type in relation_types {
-                    for event in self.get_all_events_by_relation(room_id, event_id, relation_type).await? {
+                    for event in
+                        self.get_all_events_by_relation(room_id, event_id, relation_type).await?
+                    {
                         events.push(event.take_content());
                     }
                 }
@@ -932,15 +1009,11 @@ impl_event_cache_store! {
             Some(mut inner) => {
                 let _ = inner.replace_content(event);
                 inner
-            },
-            None => types::Event::OutOfBand(OutOfBandEvent {
-                content: event,
-                position: (),
-            })
+            }
+            None => types::Event::OutOfBand(OutOfBandEvent { content: event, position: () }),
         };
         let value = self.serializer.serialize_event(room_id, &event)?;
-        self
-            .inner
+        self.inner
             .transaction_on_multi_with_mode(&[keys::EVENTS], IdbTransactionMode::Readwrite)?
             .object_store(keys::EVENTS)?
             .put_val_owned(value)?;
