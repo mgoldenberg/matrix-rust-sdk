@@ -320,17 +320,6 @@ impl IndexeddbEventCacheStore {
         Ok(chunks)
     }
 
-    #[allow(unused)]
-    async fn get_all_chunks_by_id<K: wasm_bindgen::JsCast>(
-        &self,
-        key: &K,
-    ) -> Result<Vec<types::Chunk>, IndexeddbEventCacheStoreError> {
-        let transaction = self
-            .inner
-            .transaction_on_one_with_mode(keys::LINKED_CHUNKS, IdbTransactionMode::Readonly)?;
-        self.get_all_chunks_by_id_with_transaction(&transaction, key).await
-    }
-
     async fn get_all_chunks_by_next_chunk_id_with_transaction<K: wasm_bindgen::JsCast>(
         &self,
         transaction: &IdbTransaction<'_>,
@@ -423,19 +412,6 @@ impl IndexeddbEventCacheStore {
         Ok(())
     }
 
-    #[allow(unused)]
-    async fn add_chunk(
-        &self,
-        room_id: &RoomId,
-        chunk: &types::Chunk,
-    ) -> Result<(), IndexeddbEventCacheStoreError> {
-        let transaction = self
-            .inner
-            .transaction_on_one_with_mode(keys::LINKED_CHUNKS, IdbTransactionMode::Readwrite)?;
-        self.add_chunk_with_transaction(&transaction, room_id, chunk).await?;
-        transaction.await.into_result().map_err(Into::into)
-    }
-
     async fn delete_chunk_by_id_with_transaction(
         &self,
         transaction: &IdbTransaction<'_>,
@@ -471,19 +447,6 @@ impl IndexeddbEventCacheStore {
             store.delete_owned(self.serializer.encode_chunk_id_key_as_value(room_id, id)?)?;
         }
         Ok(())
-    }
-
-    #[allow(unused)]
-    async fn delete_chunk_by_id(
-        &self,
-        room_id: &RoomId,
-        id: &ChunkIdentifier,
-    ) -> Result<(), IndexeddbEventCacheStoreError> {
-        let transaction = self
-            .inner
-            .transaction_on_one_with_mode(keys::LINKED_CHUNKS, IdbTransactionMode::Readwrite)?;
-        self.delete_chunk_by_id_with_transaction(&transaction, room_id, id).await?;
-        transaction.await.into_result().map_err(Into::into)
     }
 
     async fn get_all_gaps_by_id_with_transaction<K: wasm_bindgen::JsCast>(
