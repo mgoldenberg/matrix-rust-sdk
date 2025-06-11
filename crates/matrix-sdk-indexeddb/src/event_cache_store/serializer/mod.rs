@@ -23,7 +23,7 @@ use web_sys::IdbKeyRange;
 
 use crate::{
     event_cache_store::{
-        keys,
+        migrations::keys,
         serializer::types::{
             IndexedChunk, IndexedChunkIdKey, IndexedEvent, IndexedEventIdKey,
             IndexedEventPositionKey, IndexedEventRelationKey, IndexedGap, IndexedGapIdKey,
@@ -173,9 +173,10 @@ impl IndexeddbEventCacheStoreSerializer {
     ) -> IndexedEventRelationKey {
         let room_id = self.inner.encode_key_as_string(keys::ROOMS, room_id);
         let related_event =
-            self.inner.encode_key_as_string(keys::EVENT_RELATED_EVENTS, related_event_id);
-        let relation_type =
-            self.inner.encode_key_as_string(keys::EVENT_RELATION_TYPES, relation_type.to_string());
+            self.inner.encode_key_as_string(keys::EVENTS_RELATION_RELATED_EVENTS, related_event_id);
+        let relation_type = self
+            .inner
+            .encode_key_as_string(keys::EVENTS_RELATION_RELATION_TYPES, relation_type.to_string());
         IndexedEventRelationKey::new(room_id, related_event, relation_type)
     }
 
@@ -186,7 +187,7 @@ impl IndexeddbEventCacheStoreSerializer {
     ) -> IndexedEventRelationKey {
         let room_id = self.inner.encode_key_as_string(keys::ROOMS, room_id);
         let related_event_id =
-            self.inner.encode_key_as_string(keys::EVENT_RELATED_EVENTS, related_event_id);
+            self.inner.encode_key_as_string(keys::EVENTS_RELATION_RELATED_EVENTS, related_event_id);
         let relation_type = String::from(Self::KEY_LOWER_CHARACTER);
         IndexedEventRelationKey::new(room_id, related_event_id, relation_type)
     }
@@ -198,7 +199,7 @@ impl IndexeddbEventCacheStoreSerializer {
     ) -> IndexedEventRelationKey {
         let room_id = self.inner.encode_key_as_string(keys::ROOMS, room_id);
         let related_event_id =
-            self.inner.encode_key_as_string(keys::EVENT_RELATED_EVENTS, related_event_id);
+            self.inner.encode_key_as_string(keys::EVENTS_RELATION_RELATED_EVENTS, related_event_id);
         let relation_type = String::from(Self::KEY_UPPER_CHARACTER);
         IndexedEventRelationKey::new(room_id, related_event_id, relation_type)
     }

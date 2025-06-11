@@ -12,6 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
+//! Types used for (de)serialization of event cache store data.
+//!
+//! These types are wrappers around the types found in
+//! [`crate::event_cache_store::types`] and prepare those types for
+//! serialization in IndexedDB. They are constructed by extracting
+//! relevant values from the inner types, storing those values in indexed
+//! fields, and then storing the full types in a possibly encrypted form. This
+//! allows the data to be encrypted, while still allowing for efficient querying
+//! and retrieval of data.
+//!
+//! Each top-level type represents an object store in IndexedDB and each
+//! field - except the content field - represents an index on that object store.
+//! These types mimic the structure of the object stores and indices created in
+//! [`crate::event_cache_store::migrations`].
+
 use serde::{Deserialize, Serialize};
 
 use crate::serializer::MaybeEncrypted;
@@ -36,13 +51,14 @@ pub struct IndexedChunk {
     /// The primary key of the object store.
     pub id: IndexedChunkIdKey,
     /// An indexed key on the object store, which represents the
-    /// [`IndexedChunkIdKey`] of the next chunk in the linked list.
+    /// [`IndexedChunkIdKey`] of the next chunk in the linked list, if it
+    /// exists.
     pub next: IndexedNextChunkIdKey,
     /// The (possibly) encrypted content of the chunk.
     pub content: IndexedChunkContent,
 }
 
-/// The value associated with the [primary key]([`IndexedChunk::id`]) of the
+/// The value associated with the [primary key](IndexedChunk::id) of the
 /// [`LINKED_CHUNKS`][1] object store, which is constructed from:
 ///
 /// - The (possibly) encrypted Room ID
@@ -56,10 +72,27 @@ pub type IndexedRoomId = String;
 pub type IndexedChunkId = u64;
 pub type IndexedChunkContent = MaybeEncrypted;
 
+/// The value associated with the [`next`](IndexedChunk::next) index of the
+/// [`LINKED_CHUNKS`][1] object store, which is constructed from:
+///
+/// - The (possibly) encrypted Room ID
+/// - The Chunk ID, if there is a next chunk in the list.
+///
+/// Note: it would be more convenient to represent this type with an optional
+/// Chunk ID, but unfortunately, this creates an issue when querying for objects
+/// that don't have a `next` value, because `None` serializes to `null` which
+/// is an invalid value in any part of an IndexedDB query.
+///
+/// Furthermore, each variant must serialize to the same type, so the `None`
+/// variant must contain a non-empty tuple.
+///
+/// [1]: crate::event_cache_store::migrations::v1::create_linked_chunks_object_store
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IndexedNextChunkIdKey {
+    /// There is no next chunk.
     None((IndexedRoomId,)),
+    /// The identifier of the next chunk in the list.
     Some(IndexedChunkIdKey),
 }
 

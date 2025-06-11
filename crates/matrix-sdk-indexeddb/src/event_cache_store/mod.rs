@@ -38,6 +38,7 @@ use matrix_sdk_base::{
     media::MediaRequestParameters,
 };
 use matrix_sdk_crypto::CryptoStoreError;
+use migrations::keys;
 use ruma::{
     events::relation::RelationType, EventId, MilliSecondsSinceUnixEpoch, MxcUri, OwnedEventId,
     RoomId,
@@ -53,23 +54,6 @@ use crate::{
     },
     serializer::IndexeddbSerializerError,
 };
-
-mod keys {
-    pub const CORE: &str = "core";
-
-    // Rooms is not used as an object store, but it
-    // is used for the purposes of secure hashing when
-    // constructing keys for object stores.
-    pub const ROOMS: &str = "rooms";
-    pub const EVENTS: &str = "events";
-    pub const EVENT_POSITIONS: &str = "event_positions";
-    pub const EVENT_RELATIONS: &str = "event_relations";
-    pub const EVENT_RELATED_EVENTS: &str = "event_related_events";
-    pub const EVENT_RELATION_TYPES: &str = "event_relation_types";
-    pub const LINKED_CHUNKS: &str = "linked_chunks";
-    pub const LINKED_CHUNK_NEXTS: &str = "linked_chunk_nexts";
-    pub const GAPS: &str = "gaps";
-}
 
 #[derive(Debug, thiserror::Error)]
 pub enum IndexeddbEventCacheStoreError {
@@ -157,7 +141,7 @@ impl IndexeddbEventCacheStore {
     ) -> Result<js_sys::Array, IndexeddbEventCacheStoreError> {
         transaction
             .object_store(keys::EVENTS)?
-            .index(keys::EVENT_POSITIONS)?
+            .index(keys::EVENTS_POSITION)?
             .get_all_with_key(key)?
             .await
             .map_err(Into::into)
@@ -209,7 +193,7 @@ impl IndexeddbEventCacheStore {
         let mut events = Vec::new();
         let values = transaction
             .object_store(keys::EVENTS)?
-            .index(keys::EVENT_RELATIONS)?
+            .index(keys::EVENTS_RELATION)?
             .get_all_with_key(key)?
             .await?;
         for value in values {
@@ -345,7 +329,7 @@ impl IndexeddbEventCacheStore {
         let mut chunks = Vec::new();
         let values = transaction
             .object_store(keys::LINKED_CHUNKS)?
-            .index(keys::LINKED_CHUNK_NEXTS)?
+            .index(keys::LINKED_CHUNKS_NEXT)?
             .get_all_with_key(key)?
             .await?;
         for value in values {
@@ -597,7 +581,7 @@ impl_event_cache_store! {
 
         let linked_chunks = tx.object_store(keys::LINKED_CHUNKS)?;
         let events = tx.object_store(keys::EVENTS)?;
-        let event_positions = events.index(keys::EVENT_POSITIONS)?;
+        let event_positions = events.index(keys::EVENTS_POSITION)?;
 
         for update in updates {
             match update {

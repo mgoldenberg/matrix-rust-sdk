@@ -17,7 +17,7 @@ rustdoc-args = ["--cfg", "docsrs", "--generate-link-to-definition"]
 default = ["e2e-encryption", "state-store", "event-cache-store"]
 state-store = ["dep:matrix-sdk-base", "growable-bloom-filter"]
 e2e-encryption = ["dep:matrix-sdk-crypto"]
-event-cache-store = ["e2e-encryption"]
+event-cache-store = ["e2e-encryption", "dep:matrix-sdk-base"]
 testing = ["matrix-sdk-crypto?/testing"]
 
 [dependencies]
