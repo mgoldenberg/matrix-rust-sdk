@@ -1,15 +1,15 @@
 use std::sync::{Arc, Mutex};
 
-use async_compat::get_runtime_handle;
 use language_tags::LanguageTag;
 use matrix_sdk::{
     async_trait,
-    widget::{MessageLikeEventFilter, StateEventFilter},
+    widget::{MessageLikeEventFilter, StateEventFilter, ToDeviceEventFilter},
 };
+use matrix_sdk_common::{SendOutsideWasm, SyncOutsideWasm};
 use ruma::events::MessageLikeEventType;
 use tracing::error;
 
-use crate::room::Room;
+use crate::{room::Room, runtime::get_runtime_handle};
 
 #[derive(uniffi::Record)]
 pub struct WidgetDriverAndHandle {
@@ -327,7 +327,9 @@ pub fn get_element_call_required_permissions(
             event_type: "org.matrix.rageshake_request".to_owned(),
         },
         // To read and send encryption keys
+        WidgetEventFilter::ToDevice { event_type: "io.element.call.encryption_keys".to_owned() },
         // TODO change this to the appropriate to-device version once ready
+        // remove this once all matrixRTC call apps supports to-device encryption.
         WidgetEventFilter::MessageLikeWithType {
             event_type: "io.element.call.encryption_keys".to_owned(),
         },
@@ -494,6 +496,8 @@ pub enum WidgetEventFilter {
     StateWithType { event_type: String },
     /// Matches state events with the given `type` and `state_key`.
     StateWithTypeAndStateKey { event_type: String, state_key: String },
+    /// Matches to-device events with the given `event_type`.
+    ToDevice { event_type: String },
 }
 
 impl From<WidgetEventFilter> for matrix_sdk::widget::Filter {
@@ -510,6 +514,9 @@ impl From<WidgetEventFilter> for matrix_sdk::widget::Filter {
             }
             WidgetEventFilter::StateWithTypeAndStateKey { event_type, state_key } => {
                 Self::State(StateEventFilter::WithTypeAndStateKey(event_type.into(), state_key))
+            }
+            WidgetEventFilter::ToDevice { event_type } => {
+                Self::ToDevice(ToDeviceEventFilter { event_type: event_type.into() })
             }
         }
     }
@@ -532,18 +539,22 @@ impl From<matrix_sdk::widget::Filter> for WidgetEventFilter {
             F::State(StateEventFilter::WithTypeAndStateKey(event_type, state_key)) => {
                 Self::StateWithTypeAndStateKey { event_type: event_type.to_string(), state_key }
             }
+            F::ToDevice(ToDeviceEventFilter { event_type }) => {
+                Self::ToDevice { event_type: event_type.to_string() }
+            }
         }
     }
 }
 
 #[matrix_sdk_ffi_macros::export(callback_interface)]
-pub trait WidgetCapabilitiesProvider: Send + Sync {
+pub trait WidgetCapabilitiesProvider: SendOutsideWasm + SyncOutsideWasm {
     fn acquire_capabilities(&self, capabilities: WidgetCapabilities) -> WidgetCapabilities;
 }
 
 struct CapabilitiesProviderWrap(Arc<dyn WidgetCapabilitiesProvider>);
 
-#[async_trait]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl matrix_sdk::widget::CapabilitiesProvider for CapabilitiesProviderWrap {
     async fn acquire_capabilities(
         &self,
@@ -637,8 +648,7 @@ mod tests {
         let cap_assert = |capability: &str| {
             assert!(
                 permission_array.contains(&capability.to_owned()),
-                "The \"{}\" capability was missing from the element call capability list.",
-                capability
+                "The \"{capability}\" capability was missing from the element call capability list."
             );
         };
 

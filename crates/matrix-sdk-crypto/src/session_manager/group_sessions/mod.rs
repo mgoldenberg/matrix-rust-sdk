@@ -46,7 +46,7 @@ use crate::{
         InboundGroupSession, OutboundGroupSession, SenderData, SenderDataFinder, Session,
         ShareInfo, ShareState,
     },
-    store::{Changes, CryptoStoreWrapper, Result as StoreResult, Store},
+    store::{types::Changes, CryptoStoreWrapper, Result as StoreResult, Store},
     types::{
         events::{
             room::encrypted::{RoomEncryptedEventContent, ToDeviceEncryptedEventContent},
@@ -779,7 +779,10 @@ impl GroupSessionManager {
         // Only allow conservative sharing strategies
         let collect_strategy = match collect_strategy {
             CollectStrategy::AllDevices | CollectStrategy::ErrorOnVerifiedUserProblem => {
-                warn!("Ignoring request to use unsafe sharing strategy {:?} for room key history sharing", collect_strategy);
+                warn!(
+                    "Ignoring request to use unsafe sharing strategy {collect_strategy:?} \
+                     for room key history sharing",
+                );
                 &CollectStrategy::IdentityBasedStrategy
             }
             CollectStrategy::IdentityBasedStrategy | CollectStrategy::OnlyTrustedDevices => {
@@ -827,7 +830,7 @@ impl GroupSessionManager {
     /// Returns a tuple containing (1) the list of to-device requests, and (2)
     /// the list of devices that we could not find an olm session for (so
     /// need a withheld message).
-    async fn encrypt_content_for_devices(
+    pub(crate) async fn encrypt_content_for_devices(
         &self,
         recipient_devices: Vec<DeviceData>,
         event_type: &str,
@@ -1823,10 +1826,10 @@ mod tests {
         assert_eq!(1, decrypted.len());
         use crate::types::events::EventType;
         assert_let!(
-            ProcessedToDeviceEvent::Decrypted(decrypted_event) = decrypted.first().unwrap().clone()
+            ProcessedToDeviceEvent::Decrypted { raw, .. } = decrypted.first().unwrap().clone()
         );
         assert_eq!(
-            decrypted_event.get_field::<String>("type").unwrap().unwrap(),
+            raw.get_field::<String>("type").unwrap().unwrap(),
             RoomKeyBundleContent::EVENT_TYPE,
         );
     }

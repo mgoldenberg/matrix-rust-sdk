@@ -633,8 +633,9 @@ impl NotificationClient {
                     RawNotificationEvent::Timeline(timeline_event) => {
                         // Timeline events may be encrypted, so make sure they get decrypted first.
                         match self.retry_decryption(&room, timeline_event).await {
-                            Ok(Some(mut timeline_event)) => {
-                                let push_actions = timeline_event.push_actions.take();
+                            Ok(Some(timeline_event)) => {
+                                let push_actions =
+                                    timeline_event.push_actions().map(ToOwned::to_owned);
                                 (
                                     RawNotificationEvent::Timeline(timeline_event.into_raw()),
                                     push_actions,
@@ -681,7 +682,7 @@ impl NotificationClient {
                 if !should_notify {
                     result.add_notification(event_id, NotificationStatus::EventFilteredOut);
                 } else {
-                    let notification_status = NotificationItem::new(
+                    let notification_result = NotificationItem::new(
                         &room,
                         raw_event,
                         push_actions.as_deref(),
@@ -690,10 +691,23 @@ impl NotificationClient {
                     .await
                     .map(|event| NotificationStatus::Event(Box::new(event)));
 
-                    match notification_status {
-                        Ok(notification_item) => {
-                            result.add_notification(event_id, notification_item);
-                        }
+                    match notification_result {
+                        Ok(notification_status) => match notification_status {
+                            NotificationStatus::Event(event) => {
+                                if self.client.is_user_ignored(event.event.sender()).await {
+                                    result.add_notification(
+                                        event_id,
+                                        NotificationStatus::EventFilteredOut,
+                                    );
+                                } else {
+                                    result.add_notification(
+                                        event_id,
+                                        NotificationStatus::Event(event),
+                                    );
+                                }
+                            }
+                            _ => result.add_notification(event_id, notification_status),
+                        },
                         Err(error) => {
                             result.mark_fetching_notification_failed(event_id, error);
                         }
@@ -740,22 +754,26 @@ impl NotificationClient {
             timeline_event = decrypted_event;
         }
 
-        if let Some(actions) = timeline_event.push_actions.as_ref() {
+        if let Some(actions) = timeline_event.push_actions() {
             if !actions.iter().any(|a| a.should_notify()) {
                 return Ok(None);
             }
         }
 
-        let push_actions = timeline_event.push_actions.take();
-        Ok(Some(
-            NotificationItem::new(
-                &room,
-                RawNotificationEvent::Timeline(timeline_event.into_raw()),
-                push_actions.as_deref(),
-                state_events,
-            )
-            .await?,
-        ))
+        let push_actions = timeline_event.push_actions().map(ToOwned::to_owned);
+        let notification_item = NotificationItem::new(
+            &room,
+            RawNotificationEvent::Timeline(timeline_event.into_raw()),
+            push_actions.as_deref(),
+            state_events,
+        )
+        .await?;
+
+        if self.client.is_user_ignored(notification_item.event.sender()).await {
+            Ok(None)
+        } else {
+            Ok(Some(notification_item))
+        }
     }
 }
 
@@ -951,8 +969,12 @@ impl NotificationItem {
         if sender_display_name.is_none() || sender_avatar_url.is_none() {
             let sender_id = event.sender();
             for ev in state_events {
-                let Ok(ev) = ev.deserialize() else {
-                    continue;
+                let ev = match ev.deserialize() {
+                    Ok(ev) => ev,
+                    Err(error) => {
+                        warn!(?error, "Failed to deserialize a state event");
+                        continue;
+                    }
                 };
                 if ev.sender() != sender_id {
                     continue;

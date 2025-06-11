@@ -83,7 +83,10 @@ async fn test_default_filter() {
     timeline.handle_live_event(f.reaction(third_event_id, "+1").sender(&BOB)).await;
     timeline.handle_live_event(f.redaction(second_event_id).sender(&BOB)).await;
     let item = assert_next_matches!(stream, VectorDiff::Set { index: 3, value } => value);
-    assert_eq!(item.as_event().unwrap().content().reactions().len(), 1);
+    assert_eq!(
+        item.as_event().unwrap().content().reactions().cloned().unwrap_or_default().len(),
+        1
+    );
 
     // TODO: After adding raw timeline items, check for one here.
 
@@ -143,7 +146,7 @@ async fn test_hide_failed_to_parse() {
     // m.room.message events must have a msgtype and body in content, so this
     // event with an empty content object should fail to deserialize.
     timeline
-        .handle_live_event(TimelineEvent::new(sync_timeline_event!({
+        .handle_live_event(TimelineEvent::from_plaintext(sync_timeline_event!({
             "content": {},
             "event_id": "$eeG0HA0FAZ37wP8kXlNkxx3I",
             "origin_server_ts": 10,
@@ -155,7 +158,7 @@ async fn test_hide_failed_to_parse() {
     // Similar to above, the m.room.member state event must also not have an
     // empty content object.
     timeline
-        .handle_live_event(TimelineEvent::new(sync_timeline_event!({
+        .handle_live_event(TimelineEvent::from_plaintext(sync_timeline_event!({
             "content": {},
             "event_id": "$d5G0HA0FAZ37wP8kXlNkxx3I",
             "origin_server_ts": 2179,

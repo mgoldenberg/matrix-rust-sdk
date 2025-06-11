@@ -29,8 +29,11 @@ use matrix_sdk_crypto::{
         StaticAccountData,
     },
     store::{
-        BackupKeys, Changes, CryptoStore, CryptoStoreError, DehydratedDeviceKey, PendingChanges,
-        RoomKeyCounts, RoomSettings, StoredRoomKeyBundleData,
+        types::{
+            BackupKeys, Changes, DehydratedDeviceKey, PendingChanges, RoomKeyCounts, RoomSettings,
+            StoredRoomKeyBundleData,
+        },
+        CryptoStore, CryptoStoreError,
     },
     types::events::room_key_withheld::RoomKeyWithheldEvent,
     vodozemac::base64_encode,
@@ -670,7 +673,7 @@ impl IndexeddbCryptoStore {
 // this hack allows us to still have most of rust-analyzer's IDE functionality
 // within the impl block without having to set it up to check things against
 // the wasm target (which would disable many other parts of the codebase).
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_family = "wasm")]
 macro_rules! impl_crypto_store {
     ( $($body:tt)* ) => {
         #[async_trait(?Send)]
@@ -682,7 +685,7 @@ macro_rules! impl_crypto_store {
     };
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 macro_rules! impl_crypto_store {
     ( $($body:tt)* ) => {
         impl IndexeddbCryptoStore {
@@ -1092,7 +1095,7 @@ impl_crypto_store! {
                 idb_object.needs_backup = false;
                 object_store.put_key_val(&key, &serde_wasm_bindgen::to_value(&idb_object)?)?;
             } else {
-                warn!("Could not find inbound group session to mark it as backed up. key={:?}", key);
+                warn!(?key, "Could not find inbound group session to mark it as backed up.");
             }
         }
 
@@ -1866,7 +1869,7 @@ mod unit_tests {
     }
 }
 
-#[cfg(all(test, target_arch = "wasm32"))]
+#[cfg(all(test, target_family = "wasm"))]
 mod wasm_unit_tests {
     use std::collections::BTreeMap;
 
@@ -1930,7 +1933,7 @@ mod wasm_unit_tests {
     }
 }
 
-#[cfg(all(test, target_arch = "wasm32"))]
+#[cfg(all(test, target_family = "wasm"))]
 mod tests {
     use matrix_sdk_crypto::cryptostore_integration_tests;
 
@@ -1959,12 +1962,12 @@ mod tests {
     cryptostore_integration_tests!();
 }
 
-#[cfg(all(test, target_arch = "wasm32"))]
+#[cfg(all(test, target_family = "wasm"))]
 mod encrypted_tests {
     use matrix_sdk_crypto::{
         cryptostore_integration_tests,
         olm::Account,
-        store::{CryptoStore, PendingChanges},
+        store::{types::PendingChanges, CryptoStore},
         vodozemac::base64_encode,
     };
     use matrix_sdk_test::async_test;

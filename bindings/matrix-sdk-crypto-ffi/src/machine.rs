@@ -16,7 +16,7 @@ use matrix_sdk_crypto::{
     },
     decrypt_room_key_export, encrypt_room_key_export,
     olm::ExportedRoomKey,
-    store::{BackupDecryptionKey, Changes},
+    store::types::{BackupDecryptionKey, Changes},
     types::requests::ToDeviceRequest,
     DecryptionSettings, LocalTrust, OlmMachine as InnerMachine, UserIdentity as SdkUserIdentity,
 };
@@ -96,8 +96,8 @@ pub struct RoomKeyInfo {
     pub session_id: String,
 }
 
-impl From<matrix_sdk_crypto::store::RoomKeyInfo> for RoomKeyInfo {
-    fn from(value: matrix_sdk_crypto::store::RoomKeyInfo) -> Self {
+impl From<matrix_sdk_crypto::store::types::RoomKeyInfo> for RoomKeyInfo {
+    fn from(value: matrix_sdk_crypto::store::types::RoomKeyInfo) -> Self {
         Self {
             algorithm: value.algorithm.to_string(),
             room_id: value.room_id.to_string(),
@@ -354,7 +354,7 @@ impl OlmMachine {
             .map(|d| d.into()))
     }
 
-    /// Manually the device of the given user with the given device ID.
+    /// Manually verify the device of the given user with the given device ID.
     ///
     /// This method will attempt to sign the device using our private cross
     /// signing key.
@@ -932,6 +932,11 @@ impl OlmMachine {
                     encryption_info.verification_state.to_shield_state_lax().into()
                 },
             },
+            AlgorithmInfo::OlmV1Curve25519AesSha2 { .. } => {
+                // cannot happen because `decrypt_room_event` would have fail to decrypt olm for
+                // a room (EventError::UnsupportedAlgorithm)
+                panic!("Unsupported olm algorithm in room")
+            }
         })
     }
 

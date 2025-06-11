@@ -17,7 +17,10 @@
 
 use std::collections::BTreeSet;
 
-use matrix_sdk_base::{event_cache::store::EventCacheStoreLock, linked_chunk::Position};
+use matrix_sdk_base::{
+    event_cache::store::EventCacheStoreLock,
+    linked_chunk::{LinkedChunkId, Position},
+};
 use ruma::{OwnedEventId, OwnedRoomId};
 
 use super::{
@@ -80,7 +83,7 @@ impl Deduplicator {
         // Let the store do its magic ✨
         let duplicated_event_ids = store
             .filter_duplicated_events(
-                &self.room_id,
+                LinkedChunkId::Room(&self.room_id),
                 events.iter().filter_map(|event| event.event_id()).collect(),
             )
             .await?;
@@ -139,7 +142,7 @@ pub(super) struct DeduplicationOutcome {
 }
 
 #[cfg(test)]
-#[cfg(not(target_arch = "wasm32"))] // These tests uses the cross-process lock, so need time support.
+#[cfg(not(target_family = "wasm"))] // These tests uses the cross-process lock, so need time support.
 mod tests {
     use matrix_sdk_base::{deserialized_responses::TimelineEvent, linked_chunk::ChunkIdentifier};
     use matrix_sdk_test::{async_test, event_factory::EventFactory};
@@ -187,7 +190,7 @@ mod tests {
         // Prefill the store with ev1 and ev2.
         event_cache_store
             .handle_linked_chunk_updates(
-                room_id,
+                LinkedChunkId::Room(room_id),
                 vec![
                     Update::NewItemsChunk {
                         previous: None,
@@ -286,12 +289,12 @@ mod tests {
         let ev2 = f.text_msg("how's it going").sender(*BOB).event_id(eid2).into_event();
         let ev3 = f.text_msg("wassup").sender(*ALICE).event_id(eid3).into_event();
         // An invalid event (doesn't have an event id.).
-        let ev4 = TimelineEvent::new(Raw::from_json_string("{}".to_owned()).unwrap());
+        let ev4 = TimelineEvent::from_plaintext(Raw::from_json_string("{}".to_owned()).unwrap());
 
         // Prefill the store with ev1 and ev2.
         event_cache_store
             .handle_linked_chunk_updates(
-                room_id,
+                LinkedChunkId::Room(room_id),
                 vec![
                     // Non empty items chunk.
                     Update::NewItemsChunk {

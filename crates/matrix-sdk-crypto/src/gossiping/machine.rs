@@ -47,7 +47,7 @@ use crate::{
     identities::IdentityManager,
     olm::{InboundGroupSession, Session},
     session_manager::GroupSessionCache,
-    store::{Changes, CryptoStoreError, SecretImportError, Store, StoreCache},
+    store::{caches::StoreCache, types::Changes, CryptoStoreError, SecretImportError, Store},
     types::{
         events::{
             forwarded_room_key::ForwardedRoomKeyContent,
@@ -1119,7 +1119,7 @@ mod tests {
     use crate::{
         gossiping::KeyForwardDecision,
         olm::OutboundGroupSession,
-        store::{CryptoStore, DeviceChanges},
+        store::{types::DeviceChanges, CryptoStore},
         types::requests::AnyOutgoingRequest,
         types::{
             events::{
@@ -1134,7 +1134,10 @@ mod tests {
         identities::{DeviceData, IdentityManager, LocalTrust},
         olm::{Account, PrivateCrossSigningIdentity},
         session_manager::GroupSessionCache,
-        store::{Changes, CryptoStoreWrapper, MemoryStore, PendingChanges, Store},
+        store::{
+            types::{Changes, PendingChanges},
+            CryptoStoreWrapper, MemoryStore, Store,
+        },
         types::events::room::encrypted::{
             EncryptedEvent, EncryptedToDeviceEvent, RoomEncryptedEventContent,
         },
@@ -1265,7 +1268,8 @@ mod tests {
         second_device.set_trust_state(LocalTrust::Verified);
         bob_device.set_trust_state(LocalTrust::Verified);
         alice_machine.inner.store.save_device_data(&[bob_device, second_device]).await.unwrap();
-        bob_machine.inner.store.save_device_data(&[alice_device.clone()]).await.unwrap();
+        let devices = std::slice::from_ref(&alice_device);
+        bob_machine.inner.store.save_device_data(devices).await.unwrap();
 
         if create_sessions {
             // Create Olm sessions for our two accounts.
@@ -1486,7 +1490,8 @@ mod tests {
 
         // We need a trusted device, otherwise we won't request keys
         alice_device.set_trust_state(LocalTrust::Verified);
-        machine.inner.store.save_device_data(&[alice_device.clone()]).await.unwrap();
+        let devices = std::slice::from_ref(&alice_device);
+        machine.inner.store.save_device_data(devices).await.unwrap();
 
         let (outbound, session) = account.create_group_session_pair_with_defaults(room_id()).await;
         let content = outbound.encrypt("m.dummy", &message_like_event_content!({})).await;
@@ -1528,7 +1533,8 @@ mod tests {
 
         assert_eq!(first_session.first_known_index(), 10);
 
-        machine.inner.store.save_inbound_group_sessions(&[first_session.clone()]).await.unwrap();
+        let sessions = std::slice::from_ref(&first_session);
+        machine.inner.store.save_inbound_group_sessions(sessions).await.unwrap();
 
         // Get the cancel request.
         let id = machine
@@ -1871,7 +1877,8 @@ mod tests {
         let bob_account = bob_account();
         let bob_device = DeviceData::from_account(&bob_account);
 
-        alice_machine.inner.store.save_device_data(&[alice_device.clone()]).await.unwrap();
+        let devices = std::slice::from_ref(&alice_device);
+        alice_machine.inner.store.save_device_data(devices).await.unwrap();
 
         // Create Olm sessions for our two accounts.
         let alice_session = alice_machine
@@ -1945,7 +1952,8 @@ mod tests {
 
         // We need a trusted device, otherwise we won't serve secrets
         alice_device.set_trust_state(LocalTrust::Verified);
-        alice_machine.inner.store.save_device_data(&[alice_device.clone()]).await.unwrap();
+        let devices = std::slice::from_ref(&alice_device);
+        alice_machine.inner.store.save_device_data(devices).await.unwrap();
 
         alice_machine.receive_incoming_secret_request(&event);
         {
@@ -2013,7 +2021,7 @@ mod tests {
         alice_machine.store().save_device_data(&[bob_device.inner]).await.unwrap();
         bob_machine.store().save_device_data(&[alice_device.inner]).await.unwrap();
 
-        let decryption_key = crate::store::BackupDecryptionKey::new().unwrap();
+        let decryption_key = crate::store::types::BackupDecryptionKey::new().unwrap();
         alice_machine
             .backup_machine()
             .save_decryption_key(Some(decryption_key), None)

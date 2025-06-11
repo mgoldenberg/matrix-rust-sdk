@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use futures_core::Stream;
+use futures_util::{stream, StreamExt};
 use matrix_sdk_base::{
     media::{MediaFormat, MediaRequestParameters},
     store::StateStoreExt,
@@ -36,9 +38,13 @@ use ruma::{
     assign,
     events::{
         ignored_user_list::{IgnoredUser, IgnoredUserListEventContent},
+        media_preview_config::{
+            InviteAvatars, MediaPreviewConfigEventContent, MediaPreviews,
+            UnstableMediaPreviewConfigEventContent,
+        },
         push_rules::PushRulesEventContent,
         room::MediaSource,
-        AnyGlobalAccountDataEventContent, GlobalAccountDataEventContent,
+        AnyGlobalAccountDataEventContent, GlobalAccountDataEvent, GlobalAccountDataEventContent,
         GlobalAccountDataEventType, StaticEventContent,
     },
     push::Ruleset,
@@ -884,25 +890,34 @@ impl Account {
 
     /// Adds the given user ID to the account's ignore list.
     pub async fn ignore_user(&self, user_id: &UserId) -> Result<()> {
+        let own_user_id = self.client.user_id().ok_or(Error::AuthenticationRequired)?;
+        if user_id == own_user_id {
+            return Err(Error::CantIgnoreLoggedInUser);
+        }
+
         let mut ignored_user_list = self.get_ignored_user_list_event_content().await?;
         ignored_user_list.ignored_users.insert(user_id.to_owned(), IgnoredUser::new());
 
-        // Updating the account data
         self.set_account_data(ignored_user_list).await?;
-        // TODO: I think I should reset all the storage and perform a new local sync
-        // here but I don't know how
+
+        // In theory, we should also clear some caches here, because they may include
+        // events sent by the ignored user. In practice, we expect callers to
+        // take care of this, or subsystems to listen to user list changes and
+        // clear caches accordingly.
+
         Ok(())
     }
 
     /// Removes the given user ID from the account's ignore list.
     pub async fn unignore_user(&self, user_id: &UserId) -> Result<()> {
         let mut ignored_user_list = self.get_ignored_user_list_event_content().await?;
-        ignored_user_list.ignored_users.remove(user_id);
 
-        // Updating the account data
-        self.set_account_data(ignored_user_list).await?;
-        // TODO: I think I should reset all the storage and perform a new local sync
-        // here but I don't know how
+        // Only update account data if the user was ignored in the first place.
+        if ignored_user_list.ignored_users.remove(user_id).is_some() {
+            self.set_account_data(ignored_user_list).await?;
+        }
+
+        // See comment in `ignore_user`.
         Ok(())
     }
 
@@ -980,6 +995,164 @@ impl Account {
             .await?;
         Ok(())
     }
+
+    /// Observes the media preview configuration.
+    ///
+    /// This value is linked to the [MSC 4278](https://github.com/matrix-org/matrix-spec-proposals/pull/4278) which is still in an unstable state.
+    ///
+    /// This will return the initial value of the configuration and a stream
+    /// that will yield new values as they are received.
+    ///
+    /// The initial value is the one that was stored in the account data
+    /// when the client was started.
+    /// and the following code is using a temporary solution until we know which
+    /// Matrix version will support the stable type.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use futures_util::{pin_mut, StreamExt};
+    /// # use matrix_sdk::Client;
+    /// # use matrix_sdk::ruma::events::media_preview_config::MediaPreviews;
+    /// # use url::Url;
+    /// # async {
+    /// # let homeserver = Url::parse("http://localhost:8080")?;
+    /// # let client = Client::new(homeserver).await?;
+    /// let account = client.account();
+    ///
+    /// let (initial_config, config_stream) =
+    ///     account.observe_media_preview_config().await?;
+    ///
+    /// println!("Initial media preview config: {:?}", initial_config);
+    ///
+    /// pin_mut!(config_stream);
+    /// while let Some(new_config) = config_stream.next().await {
+    ///     println!("Updated media preview config: {:?}", new_config);
+    /// }
+    /// # anyhow::Ok(()) };
+    /// ```
+    pub async fn observe_media_preview_config(
+        &self,
+    ) -> Result<
+        (
+            Option<MediaPreviewConfigEventContent>,
+            impl Stream<Item = MediaPreviewConfigEventContent>,
+        ),
+        Error,
+    > {
+        // We need to create two observers, one for the stable event and one for the
+        // unstable and combine them into a single stream.
+        let first_observer = self
+            .client
+            .observe_events::<GlobalAccountDataEvent<MediaPreviewConfigEventContent>, ()>();
+
+        let stream = first_observer.subscribe().map(|event| event.0.content);
+
+        let second_observer = self
+            .client
+            .observe_events::<GlobalAccountDataEvent<UnstableMediaPreviewConfigEventContent>, ()>();
+
+        let second_stream = second_observer.subscribe().map(|event| event.0.content.0);
+
+        let mut combined_stream = stream::select(stream, second_stream);
+
+        let result_stream = async_stream::stream! {
+            // The observers need to be alive for the individual streams to be alive, so let's now
+            // create a stream that takes ownership of them.
+            let _first_observer = first_observer;
+            let _second_observer = second_observer;
+
+            while let Some(item) = combined_stream.next().await {
+                yield item
+            }
+        };
+
+        // We need to get the initial value of the media preview config event
+        // we do this after creating the observers to make sure that we don't
+        // create a race condition
+        let initial_value = self.get_media_preview_config_event_content().await?;
+
+        Ok((initial_value, result_stream))
+    }
+
+    /// Fetch the media preview configuration event content from the server.
+    ///
+    /// Will check first for the stable event and then for the unstable one.
+    pub async fn fetch_media_preview_config_event_content(
+        &self,
+    ) -> Result<Option<MediaPreviewConfigEventContent>> {
+        // First we check if there is avalue in the stable event
+        let media_preview_config =
+            self.fetch_account_data(GlobalAccountDataEventType::MediaPreviewConfig).await?;
+
+        let media_preview_config = if let Some(media_preview_config) = media_preview_config {
+            Some(media_preview_config)
+        } else {
+            // If there is no value in the stable event, we check the unstable
+            self.fetch_account_data(GlobalAccountDataEventType::UnstableMediaPreviewConfig).await?
+        };
+
+        // We deserialize the content of the event, if is not found we return the
+        // default
+        let media_preview_config = media_preview_config
+            .and_then(|value| value.deserialize_as::<MediaPreviewConfigEventContent>().ok());
+
+        Ok(media_preview_config)
+    }
+
+    /// Get the media preview configuration event content stored in the cache.
+    ///
+    /// Will check first for the stable event and then for the unstable one.
+    pub async fn get_media_preview_config_event_content(
+        &self,
+    ) -> Result<Option<MediaPreviewConfigEventContent>> {
+        let media_preview_config = self
+            .account_data::<MediaPreviewConfigEventContent>()
+            .await?
+            .and_then(|r| r.deserialize().ok());
+
+        if let Some(media_preview_config) = media_preview_config {
+            Ok(Some(media_preview_config))
+        } else {
+            Ok(self
+                .account_data::<UnstableMediaPreviewConfigEventContent>()
+                .await?
+                .and_then(|r| r.deserialize().ok())
+                .map(Into::into))
+        }
+    }
+
+    /// Set the media previews display policy in the timeline.
+    ///
+    /// This will always use the unstable event until we know which Matrix
+    /// version will support it.
+    pub async fn set_media_previews_display_policy(&self, policy: MediaPreviews) -> Result<()> {
+        let mut media_preview_config =
+            self.fetch_media_preview_config_event_content().await?.unwrap_or_default();
+        media_preview_config.media_previews = policy;
+
+        // Updating the unstable account data
+        let unstable_media_preview_config =
+            UnstableMediaPreviewConfigEventContent::from(media_preview_config);
+        self.set_account_data(unstable_media_preview_config).await?;
+        Ok(())
+    }
+
+    /// Set the display policy for avatars in invite requests.
+    ///
+    /// This will always use the unstable event until we know which matrix
+    /// version will support it.
+    pub async fn set_invite_avatars_display_policy(&self, policy: InviteAvatars) -> Result<()> {
+        let mut media_preview_config =
+            self.fetch_media_preview_config_event_content().await?.unwrap_or_default();
+        media_preview_config.invite_avatars = policy;
+
+        // Updating the unstable account data
+        let unstable_media_preview_config =
+            UnstableMediaPreviewConfigEventContent::from(media_preview_config);
+        self.set_account_data(unstable_media_preview_config).await?;
+        Ok(())
+    }
 }
 
 fn get_raw_content<Ev, C>(raw: Option<Raw<Ev>>) -> Result<Option<Raw<C>>> {
@@ -993,4 +1166,23 @@ fn get_raw_content<Ev, C>(raw: Option<Raw<Ev>>) -> Result<Option<Raw<C>>> {
         .map(|event| event.deserialize_as::<GetRawContent<C>>())
         .transpose()?
         .map(|get_raw| get_raw.content))
+}
+
+#[cfg(test)]
+mod tests {
+    use assert_matches::assert_matches;
+    use matrix_sdk_test::async_test;
+
+    use crate::{test_utils::client::MockClientBuilder, Error};
+
+    #[async_test]
+    async fn test_dont_ignore_oneself() {
+        let client = MockClientBuilder::new("https://example.org".to_owned()).build().await;
+
+        // It's forbidden to ignore the logged-in user.
+        assert_matches!(
+            client.account().ignore_user(client.user_id().unwrap()).await,
+            Err(Error::CantIgnoreLoggedInUser)
+        );
+    }
 }

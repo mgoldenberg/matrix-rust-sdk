@@ -64,7 +64,8 @@ mod keys {
     pub const DEPENDENTS_SEND_QUEUE: &str = "dependent_send_queue_events";
 }
 
-const DATABASE_NAME: &str = "matrix-sdk-state.sqlite3";
+/// The filename used for the SQLITE database file used by the state store.
+pub const DATABASE_NAME: &str = "matrix-sdk-state.sqlite3";
 
 /// Identifier of the latest database version.
 ///
@@ -446,18 +447,7 @@ impl SqliteStateStore {
     }
 
     async fn acquire(&self) -> Result<SqliteAsyncConn> {
-        let conn = self.pool.get().await?;
-
-        // Specify a busy timeout so that operations are automatically retried, in case
-        // the database was marked as locked, which can happen under very
-        // peculiar circumstances in WAL mode.
-        //
-        // The timeout value is in milliseconds.
-        //
-        // See also https://www.sqlite.org/wal.html#sometimes_queries_return_sqlite_busy_in_wal_mode.
-        conn.execute_batch("PRAGMA busy_timeout = 2000;").await?;
-
-        Ok(conn)
+        Ok(self.pool.get().await?)
     }
 
     fn remove_maybe_stripped_room_data(

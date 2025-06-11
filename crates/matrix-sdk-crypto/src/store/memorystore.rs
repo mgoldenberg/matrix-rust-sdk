@@ -31,9 +31,12 @@ use tracing::warn;
 use vodozemac::Curve25519PublicKey;
 
 use super::{
-    caches::DeviceStore, Account, BackupKeys, Changes, CryptoStore, DehydratedDeviceKey,
-    InboundGroupSession, PendingChanges, RoomKeyCounts, RoomSettings, Session,
-    StoredRoomKeyBundleData,
+    caches::DeviceStore,
+    types::{
+        BackupKeys, Changes, DehydratedDeviceKey, PendingChanges, RoomKeyCounts, RoomSettings,
+        StoredRoomKeyBundleData, TrackedUser,
+    },
+    Account, CryptoStore, InboundGroupSession, Session,
 };
 use crate::{
     gossiping::{GossipRequest, GossippedSecret, SecretInfo},
@@ -43,7 +46,6 @@ use crate::{
         PrivateCrossSigningIdentity, SenderDataType, StaticAccountData,
     },
     types::events::room_key_withheld::RoomKeyWithheldEvent,
-    TrackedUser,
 };
 
 fn encode_key_info(info: &SecretInfo) -> String {
@@ -183,8 +185,8 @@ impl MemoryStore {
 
 type Result<T> = std::result::Result<T, Infallible>;
 
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl CryptoStore for MemoryStore {
     type Error = Infallible;
 
@@ -755,7 +757,11 @@ mod tests {
             tests::get_account_and_session_test_helper, Account, InboundGroupSession,
             OlmMessageHash, PrivateCrossSigningIdentity, SenderData,
         },
-        store::{memorystore::MemoryStore, Changes, CryptoStore, DeviceChanges, PendingChanges},
+        store::{
+            memorystore::MemoryStore,
+            types::{Changes, DeviceChanges, PendingChanges},
+            CryptoStore,
+        },
         DeviceData,
     };
 
@@ -1245,12 +1251,14 @@ mod integration_tests {
             SenderDataType, StaticAccountData,
         },
         store::{
-            BackupKeys, Changes, CryptoStore, DehydratedDeviceKey, PendingChanges, RoomKeyCounts,
-            RoomSettings, StoredRoomKeyBundleData,
+            types::{
+                BackupKeys, Changes, DehydratedDeviceKey, PendingChanges, RoomKeyCounts,
+                RoomSettings, StoredRoomKeyBundleData, TrackedUser,
+            },
+            CryptoStore,
         },
         types::events::room_key_withheld::RoomKeyWithheldEvent,
-        Account, DeviceData, GossipRequest, GossippedSecret, SecretInfo, Session, TrackedUser,
-        UserIdentityData,
+        Account, DeviceData, GossipRequest, GossippedSecret, SecretInfo, Session, UserIdentityData,
     };
 
     /// Holds on to a MemoryStore during a test, and moves it back into STORES
@@ -1297,7 +1305,8 @@ mod integration_tests {
     }
 
     /// Forwards all methods to the underlying [MemoryStore].
-    #[async_trait]
+    #[cfg_attr(target_family = "wasm", async_trait(?Send))]
+    #[cfg_attr(not(target_family = "wasm"), async_trait)]
     impl CryptoStore for PersistentMemoryStore {
         type Error = <MemoryStore as CryptoStore>::Error;
 

@@ -14,27 +14,36 @@ use matrix_sdk::{
     test_utils::mocks::MatrixMockServer,
 };
 use matrix_sdk_base::{EncryptionState, RoomMembersUpdate, RoomState};
+use matrix_sdk_common::executor::spawn;
 use matrix_sdk_test::{
     async_test,
     event_factory::EventFactory,
     mocks::mock_encryption_state,
     test_json::{self, sync::CUSTOM_ROOM_POWER_LEVELS},
-    GlobalAccountDataTestEvent, JoinedRoomBuilder, StateTestEvent, SyncResponseBuilder,
-    DEFAULT_TEST_ROOM_ID,
+    GlobalAccountDataTestEvent, InvitedRoomBuilder, JoinedRoomBuilder, RoomAccountDataTestEvent,
+    StateTestEvent, SyncResponseBuilder, DEFAULT_TEST_ROOM_ID,
 };
 use ruma::{
     api::client::{membership::Invite3pidInit, receipt::create_receipt::v3::ReceiptType},
     assign, event_id,
     events::{
+        call::{
+            member::{
+                ActiveFocus, ActiveLivekitFocus, Application, CallApplicationContent,
+                CallMemberEventContent, CallScope,
+            },
+            notify::{ApplicationType, CallNotifyEventContent, NotifyType},
+        },
         direct::DirectUserIdentifier,
         receipt::ReceiptThread,
         room::{
             member::MembershipState,
             message::{RoomMessageEventContent, RoomMessageEventContentWithoutRelation},
         },
-        TimelineEventType,
+        Mentions, RoomAccountDataEventType, TimelineEventType,
     },
-    int, mxc_uri, owned_event_id, room_id, thirdparty, user_id, OwnedUserId, TransactionId,
+    int, mxc_uri, owned_device_id, owned_event_id, room_id, thirdparty, user_id, OwnedUserId,
+    TransactionId,
 };
 use serde_json::{from_value, json, Value};
 use stream_assert::assert_pending;
@@ -127,6 +136,76 @@ async fn test_leave_room() -> Result<(), anyhow::Error> {
 }
 
 #[async_test]
+async fn test_leave_joined_room_does_not_forget_it() -> Result<(), anyhow::Error> {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = *DEFAULT_TEST_ROOM_ID;
+
+    server.mock_room_leave().ok(room_id).mock_once().mount().await;
+    // The forget endpoint should never be called
+    server.mock_room_forget().ok().never().mount().await;
+
+    let room = server.sync_joined_room(&client, room_id).await;
+
+    room.leave().await?;
+
+    assert_eq!(room.state(), RoomState::Left);
+
+    // The left room is still around and in the right state
+    let left_room = client.get_room(room_id);
+    assert!(left_room.is_some());
+    assert_eq!(left_room.unwrap().state(), RoomState::Left);
+
+    Ok(())
+}
+
+#[async_test]
+async fn test_leave_invited_room_also_forgets_it() -> Result<(), anyhow::Error> {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = *DEFAULT_TEST_ROOM_ID;
+
+    server.mock_room_leave().ok(room_id).mock_once().mount().await;
+    server.mock_room_forget().ok().mock_once().mount().await;
+
+    let invited_room_builder = InvitedRoomBuilder::new(room_id);
+    let room = server.sync_room(&client, invited_room_builder).await;
+
+    room.leave().await?;
+
+    assert_eq!(room.state(), RoomState::Left);
+
+    let forgotten_room = client.get_room(room_id);
+    assert!(forgotten_room.is_none());
+
+    Ok(())
+}
+
+/// This test reflects a particular use case where a user is trying to leave a
+/// room and the server replies the user is forbidden to do so.
+#[async_test]
+async fn test_leave_invited_room_with_no_permissions() -> Result<(), anyhow::Error> {
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = *DEFAULT_TEST_ROOM_ID;
+
+    server.mock_room_leave().forbidden().mock_once().mount().await;
+    server.mock_room_forget().ok().mock_once().mount().await;
+
+    let invited_room_builder = InvitedRoomBuilder::new(room_id);
+    let room = server.sync_room(&client, invited_room_builder).await;
+
+    room.leave().await?;
+
+    assert_eq!(room.state(), RoomState::Left);
+
+    let forgotten_room = client.get_room(room_id);
+    assert!(forgotten_room.is_none());
+
+    Ok(())
+}
+
+#[async_test]
 async fn test_ban_user() {
     let (client, server) = logged_in_client_with_server().await;
 
@@ -174,26 +253,51 @@ async fn test_unban_user() {
 
 #[async_test]
 async fn test_mark_as_unread() {
-    let (client, server) = logged_in_client_with_server().await;
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+    let room_id = room_id!("!test:example.org");
 
-    Mock::given(method("PUT"))
-        .and(path_regex(r"^/_matrix/client/r0/user/.*/rooms/.*/account_data/m.marked_unread"))
-        .and(header("authorization", "Bearer 1234"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&*test_json::EMPTY))
-        .mount(&server)
-        .await;
+    // Initial sync with our test room.
+    let room = server.sync_joined_room(&client, room_id).await;
+    assert!(!room.is_marked_unread());
 
-    mock_sync(&server, &*test_json::SYNC, None).await;
+    // Setting the room as unread makes a request.
+    {
+        let _guard = server
+            .mock_set_room_account_data(RoomAccountDataEventType::MarkedUnread)
+            .ok()
+            .expect(1)
+            .mount_as_scoped()
+            .await;
+        room.set_unread_flag(true).await.unwrap();
+    }
 
-    let sync_settings = SyncSettings::new().timeout(Duration::from_millis(3000));
-
-    let _response = client.sync_once(sync_settings).await.unwrap();
-
-    let room = client.get_room(&DEFAULT_TEST_ROOM_ID).unwrap();
-
-    room.set_unread_flag(true).await.unwrap();
-
+    // Unsetting the room as unread is a no-op.
     room.set_unread_flag(false).await.unwrap();
+
+    // Now we mark the room as unread.
+    server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::new(room_id)
+                .add_account_data(RoomAccountDataTestEvent::MarkedUnread),
+        )
+        .await;
+    assert!(room.is_marked_unread());
+
+    // Unsetting the room as unread makes a request.
+    {
+        let _guard = server
+            .mock_set_room_account_data(RoomAccountDataEventType::MarkedUnread)
+            .ok()
+            .expect(1)
+            .mount_as_scoped()
+            .await;
+        room.set_unread_flag(false).await.unwrap();
+    }
+
+    // Setting the room as unread is a no-op.
+    room.set_unread_flag(true).await.unwrap();
 }
 
 #[async_test]
@@ -221,49 +325,101 @@ async fn test_kick_user() {
 
 #[async_test]
 async fn test_send_single_receipt() {
-    let (client, server) = logged_in_client_with_server().await;
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
 
-    Mock::given(method("POST"))
-        .and(path_regex(r"^/_matrix/client/r0/rooms/.*/receipt"))
-        .and(header("authorization", "Bearer 1234"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&*test_json::EMPTY))
-        .mount(&server)
+    server.mock_send_receipt(ReceiptType::Read).ok().mock_once().mount().await;
+
+    // Initial sync with our test room.
+    let room = server.sync_joined_room(&client, room_id!("!test:example.org")).await;
+
+    room.send_single_receipt(
+        ReceiptType::Read,
+        ReceiptThread::Unthreaded,
+        owned_event_id!("$xxxxxx:example.org"),
+    )
+    .await
+    .unwrap();
+}
+
+#[async_test]
+async fn test_send_single_receipt_with_unread_flag() {
+    let event_id = owned_event_id!("$xxxxxx:example.org");
+
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+
+    server.mock_send_receipt(ReceiptType::Read).ok().expect(2).mount().await;
+
+    // Initial sync with our test room, marked unread.
+    let room = server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::default().add_account_data(RoomAccountDataTestEvent::MarkedUnread),
+        )
         .await;
+    assert!(room.is_marked_unread());
 
-    mock_sync(&server, &*test_json::SYNC, None).await;
+    // An unthreaded receipt triggers a marked unread update.
+    {
+        let _guard = server
+            .mock_set_room_account_data(RoomAccountDataEventType::MarkedUnread)
+            .ok()
+            .mock_once()
+            .mount_as_scoped()
+            .await;
 
-    let sync_settings = SyncSettings::new().timeout(Duration::from_millis(3000));
+        room.send_single_receipt(ReceiptType::Read, ReceiptThread::Unthreaded, event_id.clone())
+            .await
+            .unwrap();
+    }
 
-    let _response = client.sync_once(sync_settings).await.unwrap();
-
-    let event_id = event_id!("$xxxxxx:example.org").to_owned();
-    let room = client.get_room(&DEFAULT_TEST_ROOM_ID).unwrap();
-
-    room.send_single_receipt(ReceiptType::Read, ReceiptThread::Unthreaded, event_id).await.unwrap();
+    // A threaded read receipt update doesn't trigger a marked unread update.
+    room.send_single_receipt(ReceiptType::Read, ReceiptThread::Main, event_id).await.unwrap();
 }
 
 #[async_test]
 async fn test_send_multiple_receipts() {
-    let (client, server) = logged_in_client_with_server().await;
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
 
-    Mock::given(method("POST"))
-        .and(path_regex(r"^/_matrix/client/r0/rooms/.*/read_markers$"))
-        .and(header("authorization", "Bearer 1234"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&*test_json::EMPTY))
-        .mount(&server)
+    server.mock_send_read_markers().ok().mock_once().mount().await;
+
+    // Initial sync with our test room.
+    let room = server.sync_joined_room(&client, room_id!("!test:example.org")).await;
+
+    let receipts = Receipts::new().fully_read_marker(owned_event_id!("$xxxxxx:example.org"));
+    room.send_multiple_receipts(receipts).await.unwrap();
+}
+
+#[async_test]
+async fn test_send_multiple_receipts_with_unread_flag() {
+    let event_id = owned_event_id!("$xxxxxx:example.org");
+
+    let server = MatrixMockServer::new().await;
+    let client = server.client_builder().build().await;
+
+    server.mock_send_read_markers().ok().mock_once().mount().await;
+    server
+        .mock_set_room_account_data(RoomAccountDataEventType::MarkedUnread)
+        .ok()
+        .mock_once()
+        .mount()
         .await;
 
-    mock_sync(&server, &*test_json::SYNC, None).await;
+    // Initial sync with our test room, marked unread.
+    let room = server
+        .sync_room(
+            &client,
+            JoinedRoomBuilder::default().add_account_data(RoomAccountDataTestEvent::MarkedUnread),
+        )
+        .await;
+    assert!(room.is_marked_unread());
 
-    let sync_settings = SyncSettings::new().timeout(Duration::from_millis(3000));
-
-    let _response = client.sync_once(sync_settings).await.unwrap();
-
-    let event_id = event_id!("$xxxxxx:example.org").to_owned();
-    let room = client.get_room(&DEFAULT_TEST_ROOM_ID).unwrap();
-
-    let receipts = Receipts::new().fully_read_marker(event_id);
-    room.send_multiple_receipts(receipts).await.unwrap();
+    // Sending receipts triggers a marked unread update.
+    room.send_multiple_receipts(Receipts::new().public_read_receipt(event_id.clone()))
+        .await
+        .unwrap();
 }
 
 #[async_test]
@@ -364,7 +520,7 @@ async fn test_room_redact() {
     assert_eq!(response.event_id, event_id);
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_family = "wasm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_fetch_members_deduplication() {
     let server = MatrixMockServer::new().await;
@@ -381,7 +537,7 @@ async fn test_fetch_members_deduplication() {
     // Create N tasks that try to fetch the members.
     for _ in 0..5 {
         #[allow(unknown_lints, clippy::redundant_async_block)] // false positive
-        let task = tokio::spawn({
+        let task = spawn({
             let room = room.clone();
             async move { room.sync_members().await }
         });
@@ -465,7 +621,7 @@ async fn test_subscribe_to_typing_notifications() {
     let room = server.sync_joined_room(&client, room_id).await;
 
     // Send to typing notification
-    let join_handle = tokio::spawn({
+    let join_handle = spawn({
         let typing_sequences = Arc::clone(&typing_sequences);
         async move {
             let (_drop_guard, mut subscriber) = room.subscribe_to_typing_notifications();
@@ -680,7 +836,8 @@ async fn test_call_notifications_ring_for_dms() {
         .mount(&server)
         .await;
 
-    room.send_call_notification_if_needed().await.unwrap();
+    let sent_event = room.send_call_notification_if_needed().await.unwrap();
+    assert!(sent_event);
 }
 
 #[async_test]
@@ -723,7 +880,8 @@ async fn test_call_notifications_notify_for_rooms() {
         .mount(&server)
         .await;
 
-    room.send_call_notification_if_needed().await.unwrap();
+    let sent_event = room.send_call_notification_if_needed().await.unwrap();
+    assert!(sent_event);
 }
 
 #[async_test]
@@ -731,7 +889,7 @@ async fn test_call_notifications_dont_notify_room_without_mention_powerlevel() {
     let (client, server) = logged_in_client_with_server().await;
 
     let mut sync_builder = SyncResponseBuilder::new();
-    let mut power_level_event = StateTestEvent::PowerLevels.into_json_value();
+    let mut power_level_event: Value = StateTestEvent::PowerLevels.into();
     // Allow noone to send room notify events.
     *power_level_event.get_mut("content").unwrap().get_mut("notifications").unwrap() =
         json!({"room": 101});
@@ -758,7 +916,65 @@ async fn test_call_notifications_dont_notify_room_without_mention_powerlevel() {
         .mount(&server)
         .await;
 
-    room.send_call_notification_if_needed().await.unwrap();
+    let sent_event = room.send_call_notification_if_needed().await.unwrap();
+    assert!(!sent_event);
+}
+
+#[async_test]
+async fn test_call_notifications_dont_notify_room_with_an_existing_call() {
+    let (client, server) = logged_in_client_with_server().await;
+
+    let mut sync_builder = SyncResponseBuilder::new();
+    let event_factory = EventFactory::new().room(&DEFAULT_TEST_ROOM_ID);
+    let call_notify_event = event_factory
+        .event(CallNotifyEventContent::new(
+            "call_id".to_owned(),
+            ApplicationType::Call,
+            NotifyType::Notify,
+            Mentions::new(),
+        ))
+        .sender(user_id!("@alice:example.org"))
+        .into_raw_sync();
+
+    let call_member_event = event_factory
+        .event(CallMemberEventContent::new(
+            Application::Call(CallApplicationContent::new("call_id".to_owned(), CallScope::Room)),
+            owned_device_id!("a-device-id"),
+            ActiveFocus::Livekit(ActiveLivekitFocus::new()),
+            Vec::new(),
+            None,
+        ))
+        .sender(user_id!("@alice:example.org"))
+        .state_key("_@alice:example.org_a-device-id")
+        .into_raw_sync()
+        .cast();
+
+    sync_builder.add_joined_room(
+        JoinedRoomBuilder::default()
+            .add_timeline_bulk([call_notify_event])
+            .add_state_bulk([call_member_event]),
+    );
+
+    mock_sync(&server, sync_builder.build_json_sync_response(), None).await;
+    mock_encryption_state(&server, false).await;
+
+    let sync_settings = SyncSettings::new().timeout(Duration::from_millis(3000));
+    let _response = client.sync_once(sync_settings).await.unwrap();
+
+    let room = client.get_room(&DEFAULT_TEST_ROOM_ID).unwrap();
+    assert!(room.has_active_room_call());
+    assert!(!room.is_direct().await.unwrap());
+
+    Mock::given(method("PUT"))
+        .and(path_regex(r"^/_matrix/client/r0/rooms/.*/send/.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"event_id": "$event_id"})))
+        // Expect no calls of the send because we dont have permission to notify.
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let sent_event = room.send_call_notification_if_needed().await.unwrap();
+    assert!(!sent_event);
 }
 
 #[async_test]
@@ -841,7 +1057,7 @@ async fn test_subscribe_to_knock_requests() {
     pin_mut!(stream);
 
     // We receive an initial knock request from Alice
-    let initial = assert_next_with_timeout!(stream, 100);
+    let initial = assert_next_with_timeout!(stream, 1000);
     assert_eq!(initial.len(), 1);
 
     let knock_request = &initial[0];
@@ -852,7 +1068,7 @@ async fn test_subscribe_to_knock_requests() {
     room.mark_knock_requests_as_seen(&[user_id.to_owned()]).await.unwrap();
 
     // Now it's received again as seen
-    let seen = assert_next_with_timeout!(stream, 100);
+    let seen = assert_next_with_timeout!(stream, 1000);
     assert_eq!(initial.len(), 1);
     let seen_knock = &seen[0];
     assert_eq!(seen_knock.event_id, knock_event_id);
@@ -867,11 +1083,11 @@ async fn test_subscribe_to_knock_requests() {
     server.sync_room(&client, joined_room_builder).await;
 
     // The knock requests are now empty because we have new member events
-    let updated_requests = assert_next_with_timeout!(stream, 100);
+    let updated_requests = assert_next_with_timeout!(stream, 1000);
     assert!(updated_requests.is_empty());
 
     // And it's emitted again because the seen id value has changed
-    let updated_requests = assert_next_with_timeout!(stream, 100);
+    let updated_requests = assert_next_with_timeout!(stream);
     assert!(updated_requests.is_empty());
 
     // There should be no other knock requests

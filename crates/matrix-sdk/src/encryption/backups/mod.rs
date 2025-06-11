@@ -26,7 +26,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use matrix_sdk_base::crypto::{
     backups::MegolmV1BackupKey,
-    store::BackupDecryptionKey,
+    store::types::BackupDecryptionKey,
     types::{requests::KeysBackupRequest, RoomKeyBackupInfo},
     OlmMachine, RoomKeyImportResult,
 };
@@ -1030,7 +1030,7 @@ impl Backups {
     }
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(all(test, not(target_family = "wasm")))]
 mod test {
     use std::time::Duration;
 

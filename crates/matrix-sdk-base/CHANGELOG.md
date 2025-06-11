@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - ReleaseDate
 
+## [0.12.0] - 2025-06-10
+
+No notable changes in this release.
+
 ## [0.11.0] - 2025-04-11
 
 ### Features
@@ -46,6 +50,8 @@ All notable changes to this project will be documented in this file.
   and `SentMediaInfo` were generalized to allow chaining multiple dependent
   file / thumbnail uploads.
   ([#4897](https://github.com/matrix-org/matrix-rust-sdk/pull/4897))
+- [**breaking**] `RoomInfo::prev_state` has been removed due to being useless.
+  ([#5054](https://github.com/matrix-org/matrix-rust-sdk/pull/5054))
 
 ## [0.10.0] - 2025-02-04
 

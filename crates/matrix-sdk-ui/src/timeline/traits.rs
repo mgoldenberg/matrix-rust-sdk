@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 use eyeball::Subscriber;
 use indexmap::IndexMap;
@@ -37,7 +37,7 @@ use ruma::{
 };
 use tracing::error;
 
-use super::{Profile, RedactError, TimelineBuilder};
+use super::{EventTimelineItem, Profile, RedactError, TimelineBuilder};
 use crate::timeline::{self, pinned_events_loader::PinnedEventsRoom, Timeline};
 
 pub trait RoomExt {
@@ -60,6 +60,12 @@ pub trait RoomExt {
     /// This allows to customize settings of the [`Timeline`] before
     /// constructing it.
     fn timeline_builder(&self) -> TimelineBuilder;
+
+    /// Return an optional [`EventTimelineItem`] corresponding to this room's
+    /// latest event.
+    fn latest_event_item(
+        &self,
+    ) -> impl Future<Output = Option<EventTimelineItem>> + SendOutsideWasm;
 }
 
 impl RoomExt for Room {
@@ -68,7 +74,15 @@ impl RoomExt for Room {
     }
 
     fn timeline_builder(&self) -> TimelineBuilder {
-        Timeline::builder(self).track_read_marker_and_receipts()
+        TimelineBuilder::new(self).track_read_marker_and_receipts()
+    }
+
+    async fn latest_event_item(&self) -> Option<EventTimelineItem> {
+        if let Some(latest_event) = (**self).latest_event() {
+            EventTimelineItem::from_latest_event(self.client(), self.room_id(), latest_event).await
+        } else {
+            None
+        }
     }
 }
 
@@ -128,9 +142,15 @@ pub(super) trait RoomDataProvider:
         &self,
         session_id: &str,
         sender: &UserId,
-    ) -> impl Future<Output = Option<EncryptionInfo>> + SendOutsideWasm;
+    ) -> impl Future<Output = Option<Arc<EncryptionInfo>>> + SendOutsideWasm;
 
     async fn relations(&self, event_id: OwnedEventId, opts: RelationsOptions) -> Result<Relations>;
+
+    /// Loads an event from the cache or network.
+    fn load_event<'a>(
+        &'a self,
+        event_id: &'a EventId,
+    ) -> impl Future<Output = Result<TimelineEvent>> + SendOutsideWasm + 'a;
 }
 
 impl RoomDataProvider for Room {
@@ -272,13 +292,17 @@ impl RoomDataProvider for Room {
         &self,
         session_id: &str,
         sender: &UserId,
-    ) -> Option<EncryptionInfo> {
+    ) -> Option<Arc<EncryptionInfo>> {
         // Pass directly on to `Room::get_encryption_info`
         self.get_encryption_info(session_id, sender).await
     }
 
     async fn relations(&self, event_id: OwnedEventId, opts: RelationsOptions) -> Result<Relations> {
         self.relations(event_id, opts).await
+    }
+
+    async fn load_event<'a>(&'a self, event_id: &'a EventId) -> Result<TimelineEvent> {
+        self.load_or_fetch_event(event_id, None).await
     }
 }
 
@@ -313,19 +337,17 @@ impl Decryptor for (matrix_sdk_base::crypto::OlmMachine, ruma::OwnedRoomId) {
         let decryption_settings =
             DecryptionSettings { sender_device_trust_requirement: TrustRequirement::Untrusted };
 
-        let mut timeline_event = match olm_machine
+        match olm_machine
             .try_decrypt_room_event(raw.cast_ref(), room_id, &decryption_settings)
             .await?
         {
-            RoomEventDecryptionResult::Decrypted(decrypted) => decrypted.into(),
-            RoomEventDecryptionResult::UnableToDecrypt(utd_info) => {
-                TimelineEvent::new_utd_event(raw.clone(), utd_info)
+            RoomEventDecryptionResult::Decrypted(decrypted) => {
+                let push_actions = push_ctx.map(|push_ctx| push_ctx.for_event(&decrypted.event));
+                Ok(TimelineEvent::from_decrypted(decrypted, push_actions))
             }
-        };
-
-        // Fill the push actions here, to mimic what `Room::decrypt_event` does.
-        timeline_event.push_actions = push_ctx.map(|ctx| ctx.for_event(timeline_event.raw()));
-
-        Ok(timeline_event)
+            RoomEventDecryptionResult::UnableToDecrypt(utd_info) => {
+                Ok(TimelineEvent::from_utd(raw.clone(), utd_info))
+            }
+        }
     }
 }

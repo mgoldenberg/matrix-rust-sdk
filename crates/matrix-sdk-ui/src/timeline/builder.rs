@@ -20,17 +20,18 @@ use std::{
 use futures_core::Stream;
 use futures_util::{pin_mut, StreamExt};
 use matrix_sdk::{
-    crypto::store::RoomKeyInfo,
+    crypto::store::types::RoomKeyInfo,
     encryption::backups::BackupState,
     event_cache::{EventsOrigin, RoomEventCache, RoomEventCacheListener, RoomEventCacheUpdate},
     executor::spawn,
     send_queue::RoomSendQueueUpdate,
     Room,
 };
+use matrix_sdk_base::{SendOutsideWasm, SyncOutsideWasm};
 use ruma::{events::AnySyncTimelineEvent, OwnedEventId, RoomVersionId};
 use tokio::sync::broadcast::{error::RecvError, Receiver};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use tracing::{info_span, trace, warn, Instrument, Span};
+use tracing::{info_span, instrument, trace, warn, Instrument, Span};
 
 use super::{
     controller::{TimelineController, TimelineSettings},
@@ -57,12 +58,12 @@ pub struct TimelineBuilder {
 }
 
 impl TimelineBuilder {
-    pub(super) fn new(room: &Room) -> Self {
+    pub fn new(room: &Room) -> Self {
         Self {
             room: room.clone(),
             settings: TimelineSettings::default(),
             unable_to_decrypt_hook: None,
-            focus: TimelineFocus::Live,
+            focus: TimelineFocus::Live { hide_threaded_events: false },
             internal_id_prefix: None,
         }
     }
@@ -134,7 +135,10 @@ impl TimelineBuilder {
     ///   they couldn't be decrypted when the appropriate room key arrives).
     pub fn event_filter<F>(mut self, filter: F) -> Self
     where
-        F: Fn(&AnySyncTimelineEvent, &RoomVersionId) -> bool + Send + Sync + 'static,
+        F: Fn(&AnySyncTimelineEvent, &RoomVersionId) -> bool
+            + SendOutsideWasm
+            + SyncOutsideWasm
+            + 'static,
     {
         self.settings.event_filter = Arc::new(filter);
         self
@@ -168,7 +172,7 @@ impl TimelineBuilder {
         let (room_event_cache, event_cache_drop) = room.event_cache().await?;
         let (_, event_subscriber) = room_event_cache.subscribe().await;
 
-        let is_live = matches!(focus, TimelineFocus::Live);
+        let is_live = matches!(focus, TimelineFocus::Live { .. });
         let is_pinned_events = matches!(focus, TimelineFocus::PinnedEvents { .. });
         let is_room_encrypted = room
             .latest_encryption_state()
@@ -312,6 +316,12 @@ impl TimelineBuilder {
 }
 
 /// The task that handles the pinned event IDs updates.
+#[instrument(
+    skip_all,
+    fields(
+        room_id = %timeline_controller.room().room_id(),
+    )
+)]
 async fn pinned_events_task<S>(pinned_event_ids_stream: S, timeline_controller: TimelineController)
 where
     S: Stream<Item = Vec<OwnedEventId>>,
@@ -319,13 +329,27 @@ where
     pin_mut!(pinned_event_ids_stream);
 
     while pinned_event_ids_stream.next().await.is_some() {
-        if let Ok(events) = timeline_controller.reload_pinned_events().await {
-            timeline_controller
-                .replace_with_initial_remote_events(
-                    events.into_iter(),
-                    RemoteEventOrigin::Pagination,
-                )
-                .await;
+        trace!("received a pinned events update");
+
+        match timeline_controller.reload_pinned_events().await {
+            Ok(Some(events)) => {
+                trace!("successfully reloaded pinned events");
+                timeline_controller
+                    .replace_with_initial_remote_events(
+                        events.into_iter(),
+                        RemoteEventOrigin::Pagination,
+                    )
+                    .await;
+            }
+
+            Ok(None) => {
+                // The list of pinned events hasn't changed since the previous
+                // time.
+            }
+
+            Err(err) => {
+                warn!("Failed to reload pinned events: {err}");
+            }
         }
     }
 }
@@ -372,26 +396,22 @@ async fn room_event_cache_updates_task(
 
             RoomEventCacheUpdate::UpdateTimelineEvents { diffs, origin } => {
                 trace!("Received new timeline events diffs");
+                let origin = match origin {
+                    EventsOrigin::Sync => RemoteEventOrigin::Sync,
+                    EventsOrigin::Pagination => RemoteEventOrigin::Pagination,
+                    EventsOrigin::Cache => RemoteEventOrigin::Cache,
+                };
 
-                // We shouldn't use the general way of adding events to timelines to
-                // non-live timelines, such as pinned events or focused timeline.
-                // These timelines should handle any live updates by themselves.
-                if !is_live {
-                    continue;
+                let has_diffs = !diffs.is_empty();
+
+                if is_live {
+                    timeline_controller.handle_remote_events_with_diffs(diffs, origin).await;
+                } else {
+                    // Only handle the remote aggregation for a non-live timeline.
+                    timeline_controller.handle_remote_aggregations(diffs, origin).await;
                 }
 
-                timeline_controller
-                    .handle_remote_events_with_diffs(
-                        diffs,
-                        match origin {
-                            EventsOrigin::Sync => RemoteEventOrigin::Sync,
-                            EventsOrigin::Pagination => RemoteEventOrigin::Pagination,
-                            EventsOrigin::Cache => RemoteEventOrigin::Cache,
-                        },
-                    )
-                    .await;
-
-                if matches!(origin, EventsOrigin::Cache) {
+                if has_diffs && matches!(origin, RemoteEventOrigin::Cache) {
                     timeline_controller.retry_event_decryption(None).await;
                 }
             }

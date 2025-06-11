@@ -11,7 +11,7 @@ use matrix_sdk::{
     event_cache::{
         BackPaginationOutcome, EventCacheError, RoomEventCacheUpdate, RoomPaginationStatus,
     },
-    linked_chunk::{ChunkIdentifier, Position, Update},
+    linked_chunk::{ChunkIdentifier, LinkedChunkId, Position, Update},
     store::StoreConfig,
     test_utils::{
         assert_event_matches_msg,
@@ -28,7 +28,7 @@ use matrix_sdk_test::{
 };
 use ruma::{
     event_id,
-    events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent},
+    events::{AnySyncMessageLikeEvent, AnySyncTimelineEvent, TimelineEventType},
     room_id, user_id, EventId, RoomVersionId,
 };
 use serde_json::json;
@@ -1347,7 +1347,15 @@ async fn test_dont_delete_gap_that_wasnt_inserted() {
 #[async_test]
 async fn test_apply_redaction_when_redaction_comes_later() {
     let server = MatrixMockServer::new().await;
-    let client = server.client_builder().build().await;
+
+    // Create a manual event cache store, so we can reuse it across multiple
+    // clients.
+    let state_memory_store = matrix_sdk_base::store::MemoryStore::new();
+    let event_cache_store = Arc::new(MemoryStore::new());
+    let store_config = StoreConfig::new("hodlor".to_owned())
+        .state_store(state_memory_store)
+        .event_cache_store(event_cache_store);
+    let client = server.client_builder().store_config(store_config.clone()).build().await;
 
     let event_cache = client.event_cache();
 
@@ -1358,7 +1366,7 @@ async fn test_apply_redaction_when_redaction_comes_later() {
 
     let f = EventFactory::new().room(room_id).sender(user_id!("@a:b.c"));
 
-    // Start with a room with two events.
+    // Start with a room with one event.
     let room = server
         .sync_room(
             &client,
@@ -1370,7 +1378,7 @@ async fn test_apply_redaction_when_redaction_comes_later() {
 
     let (room_event_cache, _drop_handles) = room.event_cache().await.unwrap();
 
-    // Wait for the first event.
+    // Wait for the event.
     let (events, mut subscriber) = room_event_cache.subscribe().await;
     if events.is_empty() {
         assert_let_timeout!(
@@ -1417,6 +1425,30 @@ async fn test_apply_redaction_when_redaction_comes_later() {
 
     // And done for now.
     assert!(subscriber.is_empty());
+
+    // If another client is created with the same store, then the stored event is
+    // already redacted.
+    drop(client);
+
+    let client = server.client_builder().store_config(store_config).build().await;
+    client.event_cache().subscribe().unwrap();
+    let room = client.get_room(room_id).unwrap();
+    let (cache, _drop_handles) = room.event_cache().await.unwrap();
+
+    let events = cache.events().await;
+
+    // We have two events:
+    assert_eq!(events.len(), 2);
+
+    // The initial event (that's been redacted),
+    let ev = events[0].raw().cast_ref::<AnySyncMessageLikeEvent>().deserialize().unwrap();
+    assert!(ev.is_redacted());
+
+    // And the redacted event.
+    assert_eq!(
+        events[1].raw().deserialize().unwrap().event_type(),
+        TimelineEventType::RoomRedaction
+    );
 }
 
 #[async_test]
@@ -1436,7 +1468,7 @@ async fn test_apply_redaction_on_an_in_store_event() {
         // 2. a chunk of 1 item, the chunk that is going to be loaded.
         event_cache_store
             .handle_linked_chunk_updates(
-                room_id,
+                LinkedChunkId::Room(room_id),
                 vec![
                     // chunk #1
                     Update::NewItemsChunk {
@@ -1644,7 +1676,7 @@ async fn test_lazy_loading() {
         // 1. a chunk of 6 items
         event_cache_store
             .handle_linked_chunk_updates(
-                room_id,
+                LinkedChunkId::Room(room_id),
                 vec![
                     // chunk #1
                     Update::NewItemsChunk {
@@ -2008,7 +2040,7 @@ async fn test_deduplication() {
         // 1. a chunk of 3 items
         event_cache_store
             .handle_linked_chunk_updates(
-                room_id,
+                LinkedChunkId::Room(room_id),
                 vec![
                     // chunk #0
                     Update::NewItemsChunk {
@@ -2314,7 +2346,7 @@ async fn test_clear_all_rooms() {
         let cid = ChunkIdentifier::new(0);
         event_cache_store
             .handle_linked_chunk_updates(
-                sleeping_room_id,
+                LinkedChunkId::Room(sleeping_room_id),
                 vec![
                     Update::NewItemsChunk { previous: None, new: cid, next: None },
                     Update::PushItems { at: Position::new(cid, 0), items: vec![ev0] },
@@ -2376,7 +2408,7 @@ async fn test_clear_all_rooms() {
 
     // The sleeping room should have been cleared too.
     let (maybe_last_chunk, _chunk_id_gen) =
-        event_cache_store.load_last_chunk(sleeping_room_id).await.unwrap();
+        event_cache_store.load_last_chunk(LinkedChunkId::Room(sleeping_room_id)).await.unwrap();
     assert!(maybe_last_chunk.is_none());
 }
 

@@ -25,7 +25,7 @@ use crate::{
     error::Result,
     read_receipts::compute_unread_counts,
     response_processors as processors,
-    rooms::normal::RoomInfoNotableUpdateReasons,
+    room::RoomInfoNotableUpdateReasons,
     store::ambiguity_map::AmbiguityCache,
     sync::{RoomUpdates, SyncResponse},
     RequestedRequiredStates,
@@ -348,7 +348,7 @@ mod tests {
     #[cfg(feature = "e2e-encryption")]
     use super::processors::room::msc4186::cache_latest_events;
     use crate::{
-        rooms::normal::{RoomHero, RoomInfoNotableUpdateReasons},
+        room::{RoomHero, RoomInfoNotableUpdateReasons},
         store::{RoomLoadSettings, StoreConfig},
         test_utils::logged_in_base_client,
         BaseClient, EncryptionState, RequestedRequiredStates, RoomInfoNotableUpdate, RoomState,
@@ -2511,12 +2511,12 @@ mod tests {
 
     #[cfg(feature = "e2e-encryption")]
     fn make_event(event_type: &str, id: &str) -> TimelineEvent {
-        TimelineEvent::new(make_raw_event(event_type, id))
+        TimelineEvent::from_plaintext(make_raw_event(event_type, id))
     }
 
     #[cfg(feature = "e2e-encryption")]
     fn make_encrypted_event(id: &str) -> TimelineEvent {
-        TimelineEvent::new_utd_event(
+        TimelineEvent::from_utd(
             Raw::from_json_string(
                 json!({
                     "type": "m.room.encrypted",

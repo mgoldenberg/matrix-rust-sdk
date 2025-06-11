@@ -24,7 +24,7 @@ use ruma::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{SendEventRequest, UpdateDelayedEventRequest};
+use super::{driver_req::SendToDeviceRequest, SendEventRequest, UpdateDelayedEventRequest};
 use crate::{widget::StateKeySelector, Error, HttpError, RumaApiError};
 
 #[derive(Deserialize, Debug)]
@@ -35,8 +35,9 @@ pub(super) enum FromWidgetRequest {
     #[serde(rename = "get_openid")]
     GetOpenId {},
     #[serde(rename = "org.matrix.msc2876.read_events")]
-    ReadEvent(ReadEventRequest),
+    ReadEvent(ReadEventsRequest),
     SendEvent(SendEventRequest),
+    SendToDevice(SendToDeviceRequest),
     #[serde(rename = "org.matrix.msc4157.update_delayed_event")]
     DelayedEventUpdate(UpdateDelayedEventRequest),
 }
@@ -73,7 +74,7 @@ impl FromWidgetErrorResponse {
         }
     }
 
-    /// Create a error response to send to the widget from a Matrix sdk error.
+    /// Create an error response to send to the widget from a Matrix SDK error.
     pub(crate) fn from_error(error: Error) -> Self {
         match error {
             Error::Http(e) => FromWidgetErrorResponse::from_http_error(*e),
@@ -102,6 +103,7 @@ struct FromWidgetError {
     message: String,
 
     /// Optional Matrix error hinting at workarounds for specific errors.
+    #[serde(skip_serializing_if = "Option::is_none")]
     matrix_api_error: Option<FromWidgetMatrixErrorBody>,
 }
 
@@ -131,6 +133,7 @@ impl SupportedApiVersionsResponse {
                 ApiVersion::V0_0_1,
                 ApiVersion::V0_0_2,
                 ApiVersion::MSC2762,
+                ApiVersion::MSC2762UpdateState,
                 ApiVersion::MSC2871,
                 ApiVersion::MSC3819,
             ],
@@ -149,11 +152,15 @@ pub(super) enum ApiVersion {
     #[serde(rename = "0.0.2")]
     V0_0_2,
 
-    /// Supports sending and receiving of events.
+    /// Supports sending and receiving events.
     #[serde(rename = "org.matrix.msc2762")]
     MSC2762,
 
-    /// Supports sending of approved capabilities back to the widget.
+    /// Supports receiving room state with the `update_state` action.
+    #[serde(rename = "org.matrix.msc2762_update_state")]
+    MSC2762UpdateState,
+
+    /// Supports sending approved capabilities back to the widget.
     #[serde(rename = "org.matrix.msc2871")]
     MSC2871,
 
@@ -169,7 +176,7 @@ pub(super) enum ApiVersion {
     #[serde(rename = "org.matrix.msc2876")]
     MSC2876,
 
-    /// Supports sending and receiving of to-device events.
+    /// Supports sending and receiving to-device events.
     #[serde(rename = "org.matrix.msc3819")]
     MSC3819,
 
@@ -179,22 +186,15 @@ pub(super) enum ApiVersion {
 }
 
 #[derive(Deserialize, Debug)]
-#[serde(untagged)]
-pub(super) enum ReadEventRequest {
-    ReadStateEvent {
-        #[serde(rename = "type")]
-        event_type: String,
-        state_key: StateKeySelector,
-    },
-    ReadMessageLikeEvent {
-        #[serde(rename = "type")]
-        event_type: String,
-        limit: Option<u32>,
-    },
+pub(super) struct ReadEventsRequest {
+    #[serde(rename = "type")]
+    pub(super) event_type: String,
+    pub(super) state_key: Option<StateKeySelector>,
+    pub(super) limit: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
-pub(super) struct ReadEventResponse {
+pub(super) struct ReadEventsResponse {
     pub(super) events: Vec<Raw<AnyTimelineEvent>>,
 }
 
@@ -235,6 +235,8 @@ impl From<delayed_state_event::unstable::Response> for SendEventResponse {
 /// [`update_delayed_event`](update_delayed_event::unstable::Response)
 /// which derives Serialize. (The response struct from Ruma does not derive
 /// serialize)
+/// This is intentionally an empty tuple struct (not a unit struct), so that it
+/// serializes to `{}` instead of `Null` when returned to the widget as json.
 #[derive(Serialize, Debug)]
 pub(crate) struct UpdateDelayedEventResponse {}
 impl From<update_delayed_event::unstable::Response> for UpdateDelayedEventResponse {
@@ -242,3 +244,11 @@ impl From<update_delayed_event::unstable::Response> for UpdateDelayedEventRespon
         Self {}
     }
 }
+
+/// The response to the widget that it received the to-device event.
+/// Only used as the response for the successful send case.
+/// FromWidgetErrorResponse will be used otherwise.
+/// This is intentionally an empty tuple struct (not a unit struct), so that it
+/// serializes to `{}` instead of `Null` when returned to the widget as json.
+#[derive(Serialize, Debug)]
+pub(crate) struct SendToDeviceEventResponse {}

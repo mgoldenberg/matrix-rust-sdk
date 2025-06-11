@@ -46,7 +46,7 @@ pub struct IdentityUpdates {
 impl IdentityUpdates {
     pub(crate) fn new(
         client: Client,
-        updates: matrix_sdk_base::crypto::store::IdentityUpdates,
+        updates: matrix_sdk_base::crypto::store::types::IdentityUpdates,
     ) -> Self {
         let new = updates
             .new
@@ -108,7 +108,7 @@ impl UserIdentity {
         Self { inner: identity, client }
     }
 
-    #[cfg(all(feature = "e2e-encryption", not(target_arch = "wasm32")))]
+    #[cfg(feature = "e2e-encryption")]
     pub(crate) fn underlying_identity(&self) -> CryptoUserIdentity {
         self.inner.clone()
     }

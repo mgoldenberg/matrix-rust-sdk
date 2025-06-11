@@ -23,13 +23,13 @@ use ruma::{
             UnstablePollStartEventContent,
         },
         room::message::{
-            MessageType, Relation, RoomMessageEventContent, RoomMessageEventContentWithoutRelation,
-            SyncRoomMessageEvent,
+            MessageType, Relation, RoomMessageEventContentWithoutRelation, SyncRoomMessageEvent,
         },
         AnySyncMessageLikeEvent, AnySyncTimelineEvent, BundledMessageLikeRelations, Mentions,
     },
     html::RemoveReplyFallback,
     serde::Raw,
+    OwnedEventId,
 };
 use tracing::{error, trace};
 
@@ -46,14 +46,14 @@ pub struct Message {
 impl Message {
     /// Construct a `Message` from a `m.room.message` event.
     pub(in crate::timeline) fn from_event(
-        c: RoomMessageEventContent,
+        mut msgtype: MessageType,
+        mentions: Option<Mentions>,
         edit: Option<RoomMessageEventContentWithoutRelation>,
         remove_reply_fallback: RemoveReplyFallback,
     ) -> Self {
-        let mut msgtype = c.msgtype;
         msgtype.sanitize(DEFAULT_SANITIZER_MODE, remove_reply_fallback);
 
-        let mut ret = Self { msgtype, edited: false, mentions: c.mentions };
+        let mut ret = Self { msgtype, edited: false, mentions };
 
         if let Some(edit) = edit {
             ret.apply_edit(edit);
@@ -111,10 +111,10 @@ pub(crate) fn extract_bundled_edit_event_json(
 }
 
 /// Extracts a replacement for a room message, if present in the bundled
-/// relations.
+/// relations , along with the event ID of the replacement event.
 pub(crate) fn extract_room_msg_edit_content(
     relations: BundledMessageLikeRelations<AnySyncMessageLikeEvent>,
-) -> Option<RoomMessageEventContentWithoutRelation> {
+) -> Option<(OwnedEventId, RoomMessageEventContentWithoutRelation)> {
     match *relations.replace? {
         AnySyncMessageLikeEvent::RoomMessage(SyncRoomMessageEvent::Original(ev)) => match ev
             .content
@@ -122,7 +122,7 @@ pub(crate) fn extract_room_msg_edit_content(
         {
             Some(Relation::Replacement(re)) => {
                 trace!("found a bundled edit event in a room message");
-                Some(re.new_content)
+                Some((ev.event_id, re.new_content))
             }
             _ => {
                 error!("got m.room.message event with an edit without a valid m.replace relation");
@@ -140,16 +140,16 @@ pub(crate) fn extract_room_msg_edit_content(
 }
 
 /// Extracts a replacement for a room message, if present in the bundled
-/// relations.
+/// relations, along with the event ID of the replacement event.
 pub(crate) fn extract_poll_edit_content(
     relations: BundledMessageLikeRelations<AnySyncMessageLikeEvent>,
-) -> Option<NewUnstablePollStartEventContentWithoutRelation> {
+) -> Option<(OwnedEventId, NewUnstablePollStartEventContentWithoutRelation)> {
     match *relations.replace? {
         AnySyncMessageLikeEvent::UnstablePollStart(SyncUnstablePollStartEvent::Original(ev)) => {
             match ev.content {
                 UnstablePollStartEventContent::Replacement(re) => {
                     trace!("found a bundled edit event in a poll");
-                    Some(re.relates_to.new_content)
+                    Some((ev.event_id, re.relates_to.new_content))
                 }
                 _ => {
                     error!("got new poll start event in a bundled edit");

@@ -1,314 +1,17 @@
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
-
 use assert_matches2::assert_matches;
 use futures_util::FutureExt;
-use imbl::HashSet;
 use matrix_sdk::{
-    authentication::matrix::MatrixSession,
-    config::RequestConfig,
     encryption::VerificationState,
-    test_utils::{client::mock_session_tokens, logged_in_client_with_server},
+    test_utils::{logged_in_client_with_server, mocks::MatrixMockServer},
     Client,
 };
-use matrix_sdk_base::SessionMeta;
-use matrix_sdk_test::{async_test, SyncResponseBuilder};
-use ruma::{
-    api::{client::keys::upload_signatures::v3::SignedKeys, MatrixVersion},
-    encryption::{CrossSigningKey, DeviceKeys},
-    owned_device_id, owned_user_id,
-    serde::Raw,
-    user_id, CrossSigningKeyId, DeviceId, OwnedDeviceId, OwnedUserId,
-};
+use matrix_sdk_test::async_test;
+use ruma::{owned_device_id, owned_user_id, user_id};
 use serde_json::json;
 use wiremock::{
     matchers::{body_json, method, path},
-    Mock, MockServer, Request, ResponseTemplate,
+    Mock, ResponseTemplate,
 };
-
-use crate::mock_sync_scoped;
-
-#[derive(Debug, Default)]
-struct Keys {
-    device: BTreeMap<OwnedUserId, BTreeMap<String, Raw<DeviceKeys>>>,
-    master: BTreeMap<OwnedUserId, Raw<CrossSigningKey>>,
-    self_signing: BTreeMap<OwnedUserId, Raw<CrossSigningKey>>,
-    user_signing: BTreeMap<OwnedUserId, Raw<CrossSigningKey>>,
-}
-
-impl Keys {
-    /// Mocks some endpoints associated to key queries and cross-signing.
-    async fn mock_endpoints(server: &MockServer, known_devices: Arc<Mutex<HashSet<String>>>) {
-        let keys = Arc::new(Mutex::new(Self::default()));
-
-        Mock::given(method("POST"))
-            .and(path("/_matrix/client/r0/keys/query"))
-            .respond_with(mock_keys_query(keys.clone()))
-            .mount(server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path("/_matrix/client/r0/keys/upload"))
-            .respond_with(mock_keys_upload(known_devices.clone(), keys.clone()))
-            .mount(server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path("/_matrix/client/unstable/keys/device_signing/upload"))
-            .respond_with(mock_keys_device_signing_upload(keys.clone()))
-            .mount(server)
-            .await;
-
-        Mock::given(method("POST"))
-            .and(path("/_matrix/client/unstable/keys/signatures/upload"))
-            .respond_with(mock_keys_signature_upload(keys.clone()))
-            .mount(server)
-            .await;
-    }
-}
-
-struct MockedServer {
-    server: MockServer,
-    known_devices: Arc<Mutex<HashSet<String>>>,
-}
-
-/// Intercepts a `/keys/query` request and mock its results as returned by an
-/// actual homeserver.
-///
-/// Supports filtering by user id, or no filters at all.
-fn mock_keys_query(keys: Arc<Mutex<Keys>>) -> impl Fn(&Request) -> ResponseTemplate {
-    move |req| {
-        #[derive(Debug, serde::Deserialize)]
-        struct Parameters {
-            device_keys: BTreeMap<OwnedUserId, Vec<OwnedDeviceId>>,
-        }
-
-        let params: Parameters = req.body_json().unwrap();
-
-        let keys = keys.lock().unwrap();
-        let mut device_keys = keys.device.clone();
-        if !params.device_keys.is_empty() {
-            device_keys.retain(|user, key_map| {
-                if let Some(devices) = params.device_keys.get(user) {
-                    if !devices.is_empty() {
-                        key_map.retain(|key_id, _json| {
-                            devices.iter().any(|device_id| &device_id.to_string() == key_id)
-                        });
-                    }
-                    true
-                } else {
-                    false
-                }
-            })
-        }
-
-        let master_keys = keys.master.clone();
-        let self_signing_keys = keys.self_signing.clone();
-        let user_signing_keys = keys.user_signing.clone();
-
-        ResponseTemplate::new(200).set_body_json(json!({
-            "device_keys": device_keys,
-            "master_keys": master_keys,
-            "self_signing_keys": self_signing_keys,
-            "user_signing_keys": user_signing_keys,
-        }))
-    }
-}
-
-/// Intercepts a `/keys/upload` query and mocks the behavior it would have on a
-/// real homeserver.
-///
-/// Inserts all the `DeviceKeys` into `Keys::device_keys`, or if already present
-/// in this mapping, only merge the signatures.
-fn mock_keys_upload(
-    known_devices: Arc<Mutex<HashSet<String>>>,
-    keys: Arc<Mutex<Keys>>,
-) -> impl Fn(&Request) -> ResponseTemplate {
-    move |req: &Request| {
-        #[derive(Debug, serde::Deserialize)]
-        struct Parameters {
-            device_keys: Option<Raw<DeviceKeys>>,
-        }
-
-        let params: Parameters = req.body_json().unwrap();
-
-        if let Some(new_device_keys) = params.device_keys {
-            let new_device_keys = new_device_keys.deserialize().unwrap();
-
-            let known_devices = known_devices.lock().unwrap();
-            let key_id = new_device_keys.device_id.to_string();
-            if known_devices.contains(&key_id) {
-                let mut keys = keys.lock().unwrap();
-                let devices = keys.device.entry(new_device_keys.user_id.clone()).or_default();
-
-                // Either merge signatures if an entry is already present, or insert a new one.
-                if let Some(device_keys) = devices.get_mut(&key_id) {
-                    let mut existing = device_keys.deserialize().unwrap();
-
-                    // Merge signatures.
-                    for (uid, sigs) in existing.signatures.iter_mut() {
-                        if let Some(new_sigs) = new_device_keys.signatures.get(uid) {
-                            sigs.extend(new_sigs.clone());
-                        }
-                    }
-                    for (uid, sigs) in new_device_keys.signatures.iter() {
-                        if !existing.signatures.contains_key(uid) {
-                            existing.signatures.insert(uid.clone(), sigs.clone());
-                        }
-                    }
-
-                    *device_keys = Raw::new(&existing).unwrap();
-                } else {
-                    devices.insert(key_id, Raw::new(&new_device_keys).unwrap());
-                }
-            }
-        }
-
-        ResponseTemplate::new(200).set_body_json(json!({
-            "one_time_key_counts": {}
-        }))
-    }
-}
-
-/// Mocks a `/keys/device_signing/upload` request for bootstrapping
-/// cross-signing.
-///
-/// Assumes (and asserts) all keys are updated at the same time.
-///
-/// Saves all the different cross-signing keys into their respective fields of
-/// `Keys`.
-fn mock_keys_device_signing_upload(
-    keys: Arc<Mutex<Keys>>,
-) -> impl Fn(&Request) -> ResponseTemplate {
-    move |req: &Request| {
-        // Accept all cross-signing setups by default.
-        #[derive(Debug, serde::Deserialize)]
-        struct Parameters {
-            master_key: Option<Raw<CrossSigningKey>>,
-            self_signing_key: Option<Raw<CrossSigningKey>>,
-            user_signing_key: Option<Raw<CrossSigningKey>>,
-        }
-
-        let params: Parameters = req.body_json().unwrap();
-        assert!(params.master_key.is_some());
-        assert!(params.self_signing_key.is_some());
-        assert!(params.user_signing_key.is_some());
-
-        let mut keys = keys.lock().unwrap();
-
-        if let Some(key) = params.master_key {
-            let deserialized = key.deserialize().unwrap();
-            let user_id = deserialized.user_id;
-            keys.master.insert(user_id, key);
-        }
-
-        if let Some(key) = params.self_signing_key {
-            let deserialized = key.deserialize().unwrap();
-            let user_id = deserialized.user_id;
-            keys.self_signing.insert(user_id, key);
-        }
-
-        if let Some(key) = params.user_signing_key {
-            let deserialized = key.deserialize().unwrap();
-            let user_id = deserialized.user_id;
-            keys.user_signing.insert(user_id, key);
-        }
-
-        ResponseTemplate::new(200).set_body_json(json!({}))
-    }
-}
-
-/// Mocks a `/keys/signatures/upload` request.
-///
-/// Supports merging signatures for master keys or devices keys.
-fn mock_keys_signature_upload(keys: Arc<Mutex<Keys>>) -> impl Fn(&Request) -> ResponseTemplate {
-    move |req: &Request| {
-        #[derive(Debug, serde::Deserialize)]
-        #[serde(transparent)]
-        struct Parameters(BTreeMap<OwnedUserId, SignedKeys>);
-
-        let params: Parameters = req.body_json().unwrap();
-
-        let mut keys = keys.lock().unwrap();
-
-        for (user, signed_keys) in params.0 {
-            for (key_id, raw_key) in signed_keys.iter() {
-                // Try to find a field in keys.master.
-                if let Some(existing_master_key) = keys.master.get_mut(&user) {
-                    let mut existing = existing_master_key.deserialize().unwrap();
-
-                    let target = CrossSigningKeyId::from_parts(
-                        ruma::SigningKeyAlgorithm::Ed25519,
-                        key_id.try_into().unwrap(),
-                    );
-
-                    if existing.keys.contains_key(&target) {
-                        let param: CrossSigningKey = serde_json::from_str(raw_key.get()).unwrap();
-
-                        for (uid, sigs) in existing.signatures.iter_mut() {
-                            if let Some(new_sigs) = param.signatures.get(uid) {
-                                sigs.extend(new_sigs.clone());
-                            }
-                        }
-                        for (uid, sigs) in param.signatures.iter() {
-                            if !existing.signatures.contains_key(uid) {
-                                existing.signatures.insert(uid.clone(), sigs.clone());
-                            }
-                        }
-
-                        // Update in map.
-                        *existing_master_key = Raw::new(&existing).unwrap();
-                        continue;
-                    }
-                }
-
-                // Otherwise, try to find a field in keys.device.
-                // Either merge signatures if an entry is already present, or insert a new
-                // entry.
-                let known_devices = keys.device.entry(user.clone()).or_default();
-                let device_keys = known_devices
-                    .get_mut(key_id)
-                    .expect("trying to add a signature for a missing key");
-
-                let param: DeviceKeys = serde_json::from_str(raw_key.get()).unwrap();
-
-                let mut existing: DeviceKeys = device_keys.deserialize().unwrap();
-
-                for (uid, sigs) in existing.signatures.iter_mut() {
-                    if let Some(new_sigs) = param.signatures.get(uid) {
-                        sigs.extend(new_sigs.clone());
-                    }
-                }
-                for (uid, sigs) in param.signatures.iter() {
-                    if !existing.signatures.contains_key(uid) {
-                        existing.signatures.insert(uid.clone(), sigs.clone());
-                    }
-                }
-
-                *device_keys = Raw::new(&existing).unwrap();
-            }
-        }
-
-        ResponseTemplate::new(200).set_body_json(json!({
-            "failures": {}
-        }))
-    }
-}
-
-impl MockedServer {
-    async fn new() -> Self {
-        let server = MockServer::start().await;
-        let known_devices: Arc<Mutex<HashSet<String>>> = Default::default();
-        Keys::mock_endpoints(&server, known_devices.clone()).await;
-        Self { server, known_devices }
-    }
-
-    fn add_known_device(&mut self, device_id: &DeviceId) {
-        self.known_devices.lock().unwrap().insert(device_id.to_string());
-    }
-}
 
 async fn bootstrap_cross_signing(client: &Client) {
     client.encryption().bootstrap_cross_signing(None).await.unwrap();
@@ -319,30 +22,15 @@ async fn bootstrap_cross_signing(client: &Client) {
 
 #[async_test]
 async fn test_own_verification() {
-    let mut server = MockedServer::new().await;
+    let server = MatrixMockServer::new().await;
+    server.mock_crypto_endpoints_preset().await;
 
     let user_id = owned_user_id!("@alice:example.org");
     let device_id = owned_device_id!("4L1C3");
-    let alice = Client::builder()
-        .homeserver_url(server.server.uri())
-        .server_versions([MatrixVersion::V1_0])
-        .request_config(RequestConfig::new().disable_retry())
-        .build()
-        .await
-        .unwrap();
-    alice
-        .restore_session(MatrixSession {
-            meta: SessionMeta { user_id: user_id.clone(), device_id: device_id.clone() },
-            tokens: mock_session_tokens(),
-        })
-        .await
-        .unwrap();
-
+    let alice = server.client_builder_for_crypto_end_to_end(&user_id, &device_id).build().await;
     // Subscribe to verification state updates
     let mut verification_state_subscriber = alice.encryption().verification_state();
     assert_eq!(alice.encryption().verification_state().get(), VerificationState::Unknown);
-
-    server.add_known_device(&device_id);
 
     // Have Alice bootstrap cross-signing.
     bootstrap_cross_signing(&alice).await;
@@ -380,18 +68,12 @@ async fn test_own_verification() {
     assert!(user_identity.is_verified());
 
     // Force a keys query to pick up the cross-signing state
-    let mut sync_response_builder = SyncResponseBuilder::new();
-    sync_response_builder.add_change_device(&user_id);
-
-    {
-        let _scope = mock_sync_scoped(
-            &server.server,
-            sync_response_builder.build_json_sync_response(),
-            None,
-        )
+    server
+        .mock_sync()
+        .ok_and_run(&alice, |builder| {
+            builder.add_change_device(&user_id);
+        })
         .await;
-        alice.sync_once(Default::default()).await.unwrap();
-    }
 
     // The device should now be cross-signed
     assert_eq!(
@@ -403,30 +85,16 @@ async fn test_own_verification() {
 
 #[async_test]
 async fn test_reset_cross_signing_resets_verification() {
-    let mut server = MockedServer::new().await;
+    let server = MatrixMockServer::new().await;
+    server.mock_crypto_endpoints_preset().await;
 
     let user_id = owned_user_id!("@alice:example.org");
     let device_id = owned_device_id!("4L1C3");
-    let alice = Client::builder()
-        .homeserver_url(server.server.uri())
-        .server_versions([MatrixVersion::V1_0])
-        .request_config(RequestConfig::new().disable_retry())
-        .build()
-        .await
-        .unwrap();
-    alice
-        .restore_session(MatrixSession {
-            meta: SessionMeta { user_id: user_id.clone(), device_id: device_id.clone() },
-            tokens: mock_session_tokens(),
-        })
-        .await
-        .unwrap();
+    let alice = server.client_builder_for_crypto_end_to_end(&user_id, &device_id).build().await;
 
     // Subscribe to verification state updates
     let mut verification_state_subscriber = alice.encryption().verification_state();
     assert_eq!(alice.encryption().verification_state().get(), VerificationState::Unknown);
-
-    server.add_known_device(&device_id);
 
     // Have Alice bootstrap cross-signing.
     bootstrap_cross_signing(&alice).await;
@@ -439,18 +107,12 @@ async fn test_reset_cross_signing_resets_verification() {
     assert_eq!(alice.encryption().verification_state().get(), VerificationState::Unverified);
 
     // Force a keys query to pick up the cross-signing state
-    let mut sync_response_builder = SyncResponseBuilder::new();
-    sync_response_builder.add_change_device(&user_id);
-
-    {
-        let _scope = mock_sync_scoped(
-            &server.server,
-            sync_response_builder.build_json_sync_response(),
-            None,
-        )
+    server
+        .mock_sync()
+        .ok_and_run(&alice, |builder| {
+            builder.add_change_device(&user_id);
+        })
         .await;
-        alice.sync_once(Default::default()).await.unwrap();
-    }
 
     // The device should now be cross-signed
     assert_eq!(
@@ -460,35 +122,17 @@ async fn test_reset_cross_signing_resets_verification() {
     assert_eq!(alice.encryption().verification_state().get(), VerificationState::Verified);
 
     let device_id = owned_device_id!("AliceDevice2");
-    let alice2 = Client::builder()
-        .homeserver_url(server.server.uri())
-        .server_versions([MatrixVersion::V1_0])
-        .request_config(RequestConfig::new().disable_retry())
-        .build()
-        .await
-        .unwrap();
-    alice2
-        .restore_session(MatrixSession {
-            meta: SessionMeta { user_id: user_id.clone(), device_id: device_id.clone() },
-            tokens: mock_session_tokens(),
-        })
-        .await
-        .unwrap();
-
-    server.add_known_device(&device_id);
+    let alice2 = server.client_builder_for_crypto_end_to_end(&user_id, &device_id).build().await;
 
     // Have Alice bootstrap cross-signing again, this time on her second device.
     bootstrap_cross_signing(&alice2).await;
 
-    {
-        let _scope = mock_sync_scoped(
-            &server.server,
-            sync_response_builder.build_json_sync_response(),
-            None,
-        )
+    server
+        .mock_sync()
+        .ok_and_run(&alice, |builder| {
+            builder.add_change_device(&user_id);
+        })
         .await;
-        alice.sync_once(Default::default()).await.unwrap();
-    }
 
     // The device shouldn't be cross-signed anymore.
     assert_eq!(alice.encryption().verification_state().get(), VerificationState::Unverified);
@@ -500,47 +144,18 @@ async fn test_reset_cross_signing_resets_verification() {
 
 #[async_test]
 async fn test_unchecked_mutual_verification() {
-    let mut server = MockedServer::new().await;
+    let server = MatrixMockServer::new().await;
+    server.mock_crypto_endpoints_preset().await;
 
-    let alice_user_id = owned_user_id!("@alice:example.org");
-    let alice_device_id = owned_device_id!("4L1C3");
-    let alice = Client::builder()
-        .homeserver_url(server.server.uri())
-        .server_versions([MatrixVersion::V1_0])
-        .request_config(RequestConfig::new().disable_retry())
-        .build()
-        .await
-        .unwrap();
-    alice
-        .restore_session(MatrixSession {
-            meta: SessionMeta {
-                user_id: alice_user_id.clone(),
-                device_id: alice_device_id.clone(),
-            },
-            tokens: mock_session_tokens(),
-        })
-        .await
-        .unwrap();
-
-    let bob = Client::builder()
-        .homeserver_url(server.server.uri())
-        .server_versions([MatrixVersion::V1_0])
-        .request_config(RequestConfig::new().disable_retry())
-        .build()
-        .await
-        .unwrap();
+    let user_id = owned_user_id!("@alice:example.org");
+    let device_id = owned_device_id!("4L1C3");
+    let alice = server.client_builder_for_crypto_end_to_end(&user_id, &device_id).build().await;
 
     let bob_user_id = owned_user_id!("@bob:example.org");
     let bob_device_id = owned_device_id!("B0B0B0B0B");
-    bob.restore_session(MatrixSession {
-        meta: SessionMeta { user_id: bob_user_id.clone(), device_id: bob_device_id.clone() },
-        tokens: mock_session_tokens(),
-    })
-    .await
-    .unwrap();
 
-    server.add_known_device(&alice_device_id);
-    server.add_known_device(&bob_device_id);
+    let bob =
+        server.client_builder_for_crypto_end_to_end(&bob_user_id, &bob_device_id).build().await;
 
     let alice_verifies_bob =
         alice.encryption().get_verification(bob.user_id().unwrap(), "flow_id").await;
@@ -559,17 +174,8 @@ async fn test_unchecked_mutual_verification() {
     bootstrap_cross_signing(&bob).await;
 
     // Have Alice and Bob upload their signed device keys.
-    {
-        let mut sync_response_builder = SyncResponseBuilder::new();
-        let response_body = sync_response_builder.build_json_sync_response();
-        let _scope = mock_sync_scoped(&server.server, response_body, None).await;
-
-        alice
-            .sync_once(Default::default())
-            .await
-            .expect("We should be able to sync with Alice so we upload the device keys");
-        bob.sync_once(Default::default()).await.unwrap();
-    }
+    server.mock_sync().ok_and_run(&alice, |_builder| {}).await;
+    server.mock_sync().ok_and_run(&bob, |_builder| {}).await;
 
     // Have Alice track Bob, so she queries his keys later.
     {
@@ -580,20 +186,7 @@ async fn test_unchecked_mutual_verification() {
 
     // Run a sync so we do send outgoing requests, including the /keys/query for
     // getting bob's identity.
-    let mut sync_response_builder = SyncResponseBuilder::new();
-
-    {
-        let _scope = mock_sync_scoped(
-            &server.server,
-            sync_response_builder.build_json_sync_response(),
-            None,
-        )
-        .await;
-        alice
-            .sync_once(Default::default())
-            .await
-            .expect("We should be able to sync so we get theinitial set of devices");
-    }
+    server.mock_sync().ok_and_run(&alice, |_builder| {}).await;
 
     // From the point of view of Alice, Bob now has a device.
     let alice_bob_device = alice
@@ -616,20 +209,14 @@ async fn test_unchecked_mutual_verification() {
 
     alice_bob_ident.verify().await.unwrap();
 
-    {
-        // Notify Alice's devices that some identify changed, so it does another
-        // /keys/query request.
-        let _scope = mock_sync_scoped(
-            &server.server,
-            sync_response_builder.add_change_device(&bob_user_id).build_json_sync_response(),
-            None,
-        )
+    // Notify Alice's devices that some identify changed, so it does another
+    // /keys/query request.
+    server
+        .mock_sync()
+        .ok_and_run(&alice, |builder| {
+            builder.add_change_device(&bob_user_id);
+        })
         .await;
-        alice
-            .sync_once(Default::default())
-            .await
-            .expect("We should be able to sync to get notified about the changed device");
-    }
 
     let alice_bob_ident = alice
         .encryption()

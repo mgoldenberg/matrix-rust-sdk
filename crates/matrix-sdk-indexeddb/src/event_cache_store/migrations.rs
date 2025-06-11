@@ -51,8 +51,8 @@ async fn setup_db(db: IdbDatabase, version: u32) -> Result<IdbDatabase, DomExcep
                 linked_chunks_object_store
                     .create_index(keys::LINKED_CHUNK_NEXTS, &IdbKeyPath::from("next"))?;
 
-                let mut event_positions_parameters = IdbIndexParameters::new();
-                event_positions_parameters.unique(true);
+                let event_positions_parameters = IdbIndexParameters::new();
+                event_positions_parameters.set_unique(true);
                 let events_object_store = events
                     .db()
                     .create_object_store_with_params(keys::EVENTS, &object_store_params)?;

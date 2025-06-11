@@ -100,12 +100,7 @@ impl CrossProcessRefreshManager {
             (Some(db), Some(known)) => db != known,
         };
 
-        trace!(
-            "Hash mismatch? {:?} (prev. known={:?}, db={:?})",
-            hash_mismatch,
-            *prev_hash,
-            db_hash
-        );
+        trace!(hash_mismatch, ?prev_hash, ?db_hash);
 
         let guard = CrossProcessRefreshLockGuard {
             hash_guard: prev_hash,
@@ -244,7 +239,7 @@ pub enum CrossProcessRefreshLockError {
     DuplicatedLock,
 }
 
-#[cfg(all(test, feature = "e2e-encryption", feature = "sqlite", not(target_arch = "wasm32")))]
+#[cfg(all(test, feature = "e2e-encryption", feature = "sqlite", not(target_family = "wasm")))]
 mod tests {
 
     use anyhow::Context as _;

@@ -436,7 +436,7 @@ impl OutboundGroupSession {
 
             error!(
                 all_request_ids = ?request_ids,
-                request_id = ?request_id,
+                ?request_id,
                 "Marking to-device request carrying a room key as sent but no \
                  request found with the given id"
             );
@@ -851,7 +851,7 @@ mod tests {
         assert!(values.is_sorted());
     }
 
-    #[cfg(any(target_os = "linux", target_os = "macos", target_arch = "wasm32"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_family = "wasm"))]
     mod expiration {
         use std::{sync::atomic::Ordering, time::Duration};
 

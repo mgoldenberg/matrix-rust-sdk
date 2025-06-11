@@ -123,7 +123,7 @@ impl TestTimelineBuilder {
     fn build(self) -> TestTimeline {
         let mut controller = TimelineController::new(
             self.provider.unwrap_or_default(),
-            TimelineFocus::Live,
+            TimelineFocus::Live { hide_threaded_events: false },
             self.internal_id_prefix,
             self.utd_hook,
             self.is_room_encrypted,
@@ -186,7 +186,7 @@ impl TestTimeline {
     }
 
     async fn handle_back_paginated_event(&self, event: Raw<AnyTimelineEvent>) {
-        let timeline_event = TimelineEvent::new(event.cast());
+        let timeline_event = TimelineEvent::from_plaintext(event.cast());
         self.controller
             .handle_remote_events_with_diffs(
                 vec![VectorDiff::PushFront { value: timeline_event }],
@@ -264,7 +264,7 @@ struct TestRoomDataProvider {
 
     /// The [`EncryptionInfo`] describing the Megolm sessions that were used to
     /// encrypt events.
-    pub encryption_info: HashMap<String, EncryptionInfo>,
+    pub encryption_info: HashMap<String, Arc<EncryptionInfo>>,
 }
 
 impl TestRoomDataProvider {
@@ -272,6 +272,7 @@ impl TestRoomDataProvider {
         self.initial_user_receipts = initial_user_receipts;
         self
     }
+
     fn with_fully_read_marker(mut self, event_id: OwnedEventId) -> Self {
         self.fully_read_marker = Some(event_id);
         self
@@ -280,7 +281,7 @@ impl TestRoomDataProvider {
     fn with_encryption_info(
         mut self,
         session_id: &str,
-        encryption_info: EncryptionInfo,
+        encryption_info: Arc<EncryptionInfo>,
     ) -> TestRoomDataProvider {
         self.encryption_info.insert(session_id.to_owned(), encryption_info);
         self
@@ -425,7 +426,7 @@ impl RoomDataProvider for TestRoomDataProvider {
         &self,
         session_id: &str,
         _sender: &UserId,
-    ) -> Option<EncryptionInfo> {
+    ) -> Option<Arc<EncryptionInfo>> {
         self.encryption_info.get(session_id).cloned()
     }
 
@@ -434,6 +435,10 @@ impl RoomDataProvider for TestRoomDataProvider {
         _event_id: OwnedEventId,
         _opts: matrix_sdk::room::RelationsOptions,
     ) -> Result<Relations, matrix_sdk::Error> {
+        unimplemented!();
+    }
+
+    async fn load_event<'a>(&'a self, _event_id: &'a EventId) -> matrix_sdk::Result<TimelineEvent> {
         unimplemented!();
     }
 }

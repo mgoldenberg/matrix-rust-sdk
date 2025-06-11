@@ -16,7 +16,7 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 #![warn(missing_docs, missing_debug_implementations)]
-#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+#![cfg_attr(target_family = "wasm", allow(clippy::arc_with_non_send_sync))]
 
 pub mod backups;
 mod ciphers;
@@ -98,7 +98,8 @@ pub use olm::{Account, CrossSigningStatus, EncryptionSettings, Session};
 use serde::{Deserialize, Serialize};
 pub use session_manager::CollectStrategy;
 pub use store::{
-    CrossSigningKeyExport, CryptoStoreError, SecretImportError, SecretInfo, TrackedUser,
+    types::{CrossSigningKeyExport, TrackedUser},
+    CryptoStoreError, SecretImportError, SecretInfo,
 };
 pub use verification::{
     format_emojis, AcceptSettings, AcceptedProtocols, CancelInfo, Emoji, EmojiShortAuthString, Sas,
