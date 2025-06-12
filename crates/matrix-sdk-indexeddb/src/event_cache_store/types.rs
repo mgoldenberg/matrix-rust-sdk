@@ -69,6 +69,27 @@ impl From<Event> for TimelineEvent {
 }
 
 impl Event {
+    pub fn event_id(&self) -> Option<OwnedEventId> {
+        match self {
+            Event::InBand(i) => i.content.event_id(),
+            Event::OutOfBand(o) => o.content.event_id(),
+        }
+    }
+
+    pub fn relation(&self) -> Option<(OwnedEventId, String)> {
+        match self {
+            Event::InBand(i) => i.relation(),
+            Event::OutOfBand(o) => o.relation(),
+        }
+    }
+
+    pub fn position(&self) -> Option<Position> {
+        match self {
+            Event::InBand(i) => Some(i.position),
+            Event::OutOfBand(_) => None,
+        }
+    }
+
     pub fn take_content(self) -> TimelineEvent {
         match self {
             Event::InBand(i) => i.content,
@@ -138,6 +159,8 @@ impl From<matrix_sdk_base::linked_chunk::Position> for Position {
 /// which can be stored in IndexedDB.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Gap {
+    /// The identifier of the chunk which is represented by this gap
+    pub chunk_identifier: u64,
     /// The token to use in the query, extracted from a previous "from" /
     /// "end" field of a `/messages` response.
     pub prev_token: String,
