@@ -15,7 +15,7 @@
 pub mod types;
 
 use gloo_utils::format::JsValueSerdeExt;
-use ruma::{EventId, RoomId};
+use ruma::RoomId;
 use serde::{de::DeserializeOwned, Serialize};
 use wasm_bindgen::JsValue;
 use web_sys::IdbKeyRange;
@@ -23,7 +23,7 @@ use web_sys::IdbKeyRange;
 use crate::{
     event_cache_store::{
         serializer::types::{
-            Indexed, IndexedEventPositionKey, IndexedEventRelationKey, IndexedKey, IndexedKeyRange,
+            Indexed, IndexedEventPositionKey, IndexedKey, IndexedKeyBounds, IndexedPartialKeyBounds,
         },
         types::{Event, Position},
     },
@@ -107,7 +107,7 @@ impl IndexeddbEventCacheStoreSerializer {
     ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error>
     where
         T: Indexed,
-        K: IndexedKeyRange<T> + Serialize,
+        K: IndexedKeyBounds<T> + Serialize,
     {
         let lower = serde_wasm_bindgen::to_value(&K::encode_lower(room_id, &self.inner))?;
         let upper = serde_wasm_bindgen::to_value(&K::encode_upper(room_id, &self.inner))?;
@@ -122,10 +122,32 @@ impl IndexeddbEventCacheStoreSerializer {
     ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error>
     where
         T: Indexed,
-        K: IndexedKeyRange<T> + Serialize,
+        K: IndexedKeyBounds<T> + Serialize,
     {
         let lower = serde_wasm_bindgen::to_value(&K::encode(room_id, lower, &self.inner))?;
         let upper = serde_wasm_bindgen::to_value(&K::encode(room_id, upper, &self.inner))?;
+        Ok(IdbKeyRange::bound(&lower, &upper)?)
+    }
+
+    pub fn encode_partial_key_range<T, K, C>(
+        &self,
+        room_id: &RoomId,
+        components: &C,
+    ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error>
+    where
+        T: Indexed,
+        K: IndexedPartialKeyBounds<T, C> + Serialize,
+    {
+        let lower = serde_wasm_bindgen::to_value(&K::encode_partial_lower(
+            room_id,
+            components,
+            &self.inner,
+        ))?;
+        let upper = serde_wasm_bindgen::to_value(&K::encode_partial_upper(
+            room_id,
+            components,
+            &self.inner,
+        ))?;
         Ok(IdbKeyRange::bound(&lower, &upper)?)
     }
 
@@ -157,20 +179,5 @@ impl IndexeddbEventCacheStoreSerializer {
                 index: js_sys::Number::MAX_SAFE_INTEGER as usize,
             },
         )?)
-    }
-
-    pub fn encode_event_relation_range_for_related_event(
-        &self,
-        room_id: &RoomId,
-        related_event_id: &EventId,
-    ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error> {
-        let (lower, upper) = IndexedEventRelationKey::encode_event_relation_range_for_related_event(
-            room_id,
-            related_event_id,
-            &self.inner,
-        );
-        let lower = serde_wasm_bindgen::to_value(&lower)?;
-        let upper = serde_wasm_bindgen::to_value(&upper)?;
-        Ok(IdbKeyRange::bound(&lower, &upper)?)
     }
 }

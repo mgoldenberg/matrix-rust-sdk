@@ -29,7 +29,7 @@
 
 use matrix_sdk_base::linked_chunk::ChunkIdentifier;
 use matrix_sdk_crypto::CryptoStoreError;
-use ruma::{events::relation::RelationType, EventId, OwnedEventId, RoomId};
+use ruma::{events::relation::RelationType, OwnedEventId, RoomId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -42,6 +42,8 @@ use crate::{
 };
 
 pub trait Indexed: Sized {
+    const OBJECT_STORE: &'static str;
+
     type IndexedType;
     type Error;
 
@@ -58,7 +60,13 @@ pub trait Indexed: Sized {
 }
 
 pub trait IndexedKey<T: Indexed> {
-    type KeyComponents: ?Sized;
+    const PATH: &'static str;
+
+    type KeyComponents;
+
+    fn index() -> Option<&'static str> {
+        None
+    }
 
     fn encode(
         room_id: &RoomId,
@@ -70,9 +78,23 @@ pub trait IndexedKey<T: Indexed> {
 const INDEXED_KEY_LOWER_CHARACTER: char = '\u{0000}';
 const INDEXED_KEY_UPPER_CHARACTER: char = '\u{FFFF}';
 
-pub trait IndexedKeyRange<T: Indexed>: IndexedKey<T> {
+pub trait IndexedKeyBounds<T: Indexed>: IndexedKey<T> {
     fn encode_lower(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self;
     fn encode_upper(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self;
+}
+
+pub trait IndexedPartialKeyBounds<T: Indexed, PartialKeyComponents>: IndexedKey<T> {
+    fn encode_partial_lower(
+        room_id: &RoomId,
+        components: &PartialKeyComponents,
+        serializer: &IndexeddbSerializer,
+    ) -> Self;
+
+    fn encode_partial_upper(
+        room_id: &RoomId,
+        components: &PartialKeyComponents,
+        serializer: &IndexeddbSerializer,
+    ) -> Self;
 }
 
 /// A type that wraps a (de)serialized value `value` and associates it
@@ -103,6 +125,8 @@ pub struct IndexedChunk {
 }
 
 impl Indexed for Chunk {
+    const OBJECT_STORE: &'static str = keys::LINKED_CHUNKS;
+
     type IndexedType = IndexedChunk;
     type Error = CryptoStoreError;
 
@@ -145,6 +169,8 @@ impl Indexed for Chunk {
 pub struct IndexedChunkIdKey(IndexedRoomId, IndexedChunkId);
 
 impl IndexedKey<Chunk> for IndexedChunkIdKey {
+    const PATH: &'static str = keys::LINKED_CHUNKS_KEY_PATH;
+
     type KeyComponents = ChunkIdentifier;
 
     fn encode(
@@ -158,7 +184,7 @@ impl IndexedKey<Chunk> for IndexedChunkIdKey {
     }
 }
 
-impl IndexedKeyRange<Chunk> for IndexedChunkIdKey {
+impl IndexedKeyBounds<Chunk> for IndexedChunkIdKey {
     fn encode_lower(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
         <Self as IndexedKey<Chunk>>::encode(room_id, &ChunkIdentifier::new(0), serializer)
     }
@@ -201,7 +227,13 @@ pub enum IndexedNextChunkIdKey {
 }
 
 impl IndexedKey<Chunk> for IndexedNextChunkIdKey {
+    const PATH: &'static str = keys::LINKED_CHUNKS_NEXT_KEY_PATH;
+
     type KeyComponents = Option<ChunkIdentifier>;
+
+    fn index() -> Option<&'static str> {
+        Some(keys::LINKED_CHUNKS_NEXT)
+    }
 
     fn encode(
         room_id: &RoomId,
@@ -221,7 +253,7 @@ impl IndexedKey<Chunk> for IndexedNextChunkIdKey {
     }
 }
 
-impl IndexedKeyRange<Chunk> for IndexedNextChunkIdKey {
+impl IndexedKeyBounds<Chunk> for IndexedNextChunkIdKey {
     fn encode_lower(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
         <Self as IndexedKey<Chunk>>::encode(room_id, &None, serializer)
     }
@@ -261,6 +293,8 @@ pub enum IndexedEventError {
 }
 
 impl Indexed for Event {
+    const OBJECT_STORE: &'static str = keys::EVENTS;
+
     type IndexedType = IndexedEvent;
     type Error = IndexedEventError;
 
@@ -293,6 +327,8 @@ impl Indexed for Event {
 }
 
 impl Indexed for InBandEvent {
+    const OBJECT_STORE: &'static str = keys::EVENTS;
+
     type IndexedType = IndexedEvent;
     type Error = IndexedEventError;
 
@@ -333,16 +369,18 @@ impl Indexed for InBandEvent {
 pub struct IndexedEventIdKey(IndexedRoomId, IndexedEventId);
 
 impl IndexedKey<Event> for IndexedEventIdKey {
-    type KeyComponents = EventId;
+    const PATH: &'static str = keys::EVENTS_KEY_PATH;
 
-    fn encode(room_id: &RoomId, event_id: &EventId, serializer: &IndexeddbSerializer) -> Self {
+    type KeyComponents = OwnedEventId;
+
+    fn encode(room_id: &RoomId, event_id: &OwnedEventId, serializer: &IndexeddbSerializer) -> Self {
         let room_id = serializer.encode_key_as_string(keys::ROOMS, room_id);
         let event_id = serializer.encode_key_as_string(keys::EVENTS, event_id);
         IndexedEventIdKey::new(room_id, event_id)
     }
 }
 
-impl IndexedKeyRange<Event> for IndexedEventIdKey {
+impl IndexedKeyBounds<Event> for IndexedEventIdKey {
     fn encode_lower(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
         let room_id = serializer.encode_key_as_string(keys::ROOMS, room_id);
         let event_id = String::from(INDEXED_KEY_LOWER_CHARACTER);
@@ -376,7 +414,13 @@ pub type IndexedEventId = String;
 pub struct IndexedEventPositionKey(IndexedRoomId, IndexedChunkId, IndexedEventPositionIndex);
 
 impl IndexedKey<Event> for IndexedEventPositionKey {
+    const PATH: &'static str = keys::EVENTS_POSITION_KEY_PATH;
+
     type KeyComponents = Position;
+
+    fn index() -> Option<&'static str> {
+        Some(keys::EVENTS_POSITION)
+    }
 
     fn encode(room_id: &RoomId, position: &Position, serializer: &IndexeddbSerializer) -> Self {
         let room_id = serializer.encode_key_as_string(keys::ROOMS, room_id);
@@ -384,7 +428,7 @@ impl IndexedKey<Event> for IndexedEventPositionKey {
     }
 }
 
-impl IndexedKeyRange<Event> for IndexedEventPositionKey {
+impl IndexedKeyBounds<Event> for IndexedEventPositionKey {
     fn encode_lower(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
         <Self as IndexedKey<Event>>::encode(
             room_id,
@@ -419,7 +463,13 @@ pub type IndexedEventPositionIndex = usize;
 pub struct IndexedEventRelationKey(IndexedRoomId, IndexedEventId, IndexedRelationType);
 
 impl IndexedKey<Event> for IndexedEventRelationKey {
+    const PATH: &'static str = keys::EVENTS_RELATION_KEY_PATH;
+
     type KeyComponents = (OwnedEventId, RelationType);
+
+    fn index() -> Option<&'static str> {
+        Some(keys::EVENTS_RELATION)
+    }
 
     fn encode(
         room_id: &RoomId,
@@ -435,7 +485,7 @@ impl IndexedKey<Event> for IndexedEventRelationKey {
     }
 }
 
-impl IndexedKeyRange<Event> for IndexedEventRelationKey {
+impl IndexedKeyBounds<Event> for IndexedEventRelationKey {
     fn encode_lower(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
         let room_id = serializer.encode_key_as_string(keys::ROOMS, room_id);
         let related_event_id = String::from(INDEXED_KEY_LOWER_CHARACTER);
@@ -451,19 +501,27 @@ impl IndexedKeyRange<Event> for IndexedEventRelationKey {
     }
 }
 
-impl IndexedEventRelationKey {
-    pub fn encode_event_relation_range_for_related_event(
+impl IndexedPartialKeyBounds<Event, OwnedEventId> for IndexedEventRelationKey {
+    fn encode_partial_lower(
         room_id: &RoomId,
-        related_event_id: &EventId,
+        related_event_id: &OwnedEventId,
         serializer: &IndexeddbSerializer,
-    ) -> (Self, Self) {
-        let related_event_id =
+    ) -> Self {
+        let mut key = Self::encode_lower(room_id, serializer);
+        key.1 =
             serializer.encode_key_as_string(keys::EVENTS_RELATION_RELATED_EVENTS, related_event_id);
-        let mut lower = Self::encode_lower(room_id, serializer);
-        lower.1 = related_event_id.clone();
-        let mut upper = Self::encode_upper(room_id, serializer);
-        upper.1 = related_event_id;
-        (lower, upper)
+        key
+    }
+
+    fn encode_partial_upper(
+        room_id: &RoomId,
+        related_event_id: &OwnedEventId,
+        serializer: &IndexeddbSerializer,
+    ) -> Self {
+        let mut key = Self::encode_upper(room_id, serializer);
+        key.1 =
+            serializer.encode_key_as_string(keys::EVENTS_RELATION_RELATED_EVENTS, related_event_id);
+        key
     }
 }
 
@@ -485,6 +543,8 @@ pub struct IndexedGap {
 }
 
 impl Indexed for Gap {
+    const OBJECT_STORE: &'static str = keys::GAPS;
+
     type IndexedType = IndexedGap;
     type Error = CryptoStoreError;
 
@@ -520,6 +580,8 @@ impl Indexed for Gap {
 pub type IndexedGapIdKey = IndexedChunkIdKey;
 
 impl IndexedKey<Gap> for IndexedGapIdKey {
+    const PATH: &'static str = keys::GAPS_KEY_PATH;
+
     type KeyComponents = <IndexedChunkIdKey as IndexedKey<Chunk>>::KeyComponents;
 
     fn encode(
@@ -531,13 +593,13 @@ impl IndexedKey<Gap> for IndexedGapIdKey {
     }
 }
 
-impl IndexedKeyRange<Gap> for IndexedGapIdKey {
+impl IndexedKeyBounds<Gap> for IndexedGapIdKey {
     fn encode_lower(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
-        <IndexedChunkIdKey as IndexedKeyRange<Chunk>>::encode_lower(room_id, serializer)
+        <IndexedChunkIdKey as IndexedKeyBounds<Chunk>>::encode_lower(room_id, serializer)
     }
 
     fn encode_upper(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
-        <IndexedChunkIdKey as IndexedKeyRange<Chunk>>::encode_upper(room_id, serializer)
+        <IndexedChunkIdKey as IndexedKeyBounds<Chunk>>::encode_upper(room_id, serializer)
     }
 }
 

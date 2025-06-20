@@ -15,6 +15,7 @@
 mod builder;
 mod migrations;
 mod serializer;
+mod transaction;
 mod types;
 
 use std::future::IntoFuture;
@@ -56,6 +57,7 @@ use crate::{
             },
             IndexeddbEventCacheStoreSerializer,
         },
+        transaction::EventCacheStoreTransaction,
         types::{ChunkType, InBandEvent, OutOfBandEvent},
     },
     serializer::IndexeddbSerializerError,
@@ -149,6 +151,17 @@ impl IndexeddbEventCacheStore {
         IndexeddbEventCacheStoreBuilder::new()
     }
 
+    pub fn transaction<'a>(
+        &'a self,
+        stores: &[&str],
+        mode: IdbTransactionMode,
+    ) -> Result<EventCacheStoreTransaction<'a>, IndexeddbEventCacheStoreError> {
+        Ok(EventCacheStoreTransaction::new(
+            self.inner.transaction_on_multi_with_mode(stores, mode)?,
+            &self.serializer,
+        ))
+    }
+
     async fn get_all_events_by_position_with_transaction<K: wasm_bindgen::JsCast>(
         &self,
         transaction: &IdbTransaction<'_>,
@@ -182,7 +195,9 @@ impl IndexeddbEventCacheStore {
         event_id: &EventId,
     ) -> Result<Option<types::Event>, IndexeddbEventCacheStoreError> {
         let key = serde_wasm_bindgen::to_value(
-            &self.serializer.encode_key::<types::Event, IndexedEventIdKey>(room_id, event_id),
+            &self
+                .serializer
+                .encode_key::<types::Event, IndexedEventIdKey>(room_id, &event_id.to_owned()),
         )?;
         let mut events = self.get_all_events_by_id_with_transaction(transaction, &key).await?;
         if events.len() > 1 {
@@ -248,9 +263,11 @@ impl IndexeddbEventCacheStore {
         room_id: &RoomId,
         related_event_id: &EventId,
     ) -> Result<Vec<types::Event>, IndexeddbEventCacheStoreError> {
-        let range = self
-            .serializer
-            .encode_event_relation_range_for_related_event(room_id, related_event_id)?;
+        let range =
+            self.serializer.encode_partial_key_range::<types::Event, IndexedEventRelationKey, _>(
+                room_id,
+                &related_event_id.to_owned(),
+            )?;
         self.get_all_events_by_relation_range(&range).await
     }
 
