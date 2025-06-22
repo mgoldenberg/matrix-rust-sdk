@@ -22,7 +22,9 @@ use wasm_bindgen::JsValue;
 use web_sys::IdbKeyRange;
 
 use crate::{
-    event_cache_store::serializer::types::{Indexed, IndexedKey, IndexedKeyBounds},
+    event_cache_store::serializer::types::{
+        Indexed, IndexedKey, IndexedKeyBounds, IndexedKeyRange,
+    },
     serializer::{IndexeddbSerializer, IndexeddbSerializerError},
 };
 
@@ -116,31 +118,31 @@ impl IndexeddbEventCacheStoreSerializer {
         serde_wasm_bindgen::to_value(&self.encode_key::<T, K>(room_id, components))
     }
 
-    pub fn encode_key_range<T, K>(
+    pub fn encode_key_range<'a, T, K>(
         &self,
         room_id: &RoomId,
+        range: impl Into<IndexedKeyRange<&'a K::KeyComponents>>,
     ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error>
     where
         T: Indexed,
         K: IndexedKeyBounds<T> + Serialize,
+        K::KeyComponents: 'a,
     {
-        let lower = serde_wasm_bindgen::to_value(&K::lower_key(room_id, &self.inner))?;
-        let upper = serde_wasm_bindgen::to_value(&K::upper_key(room_id, &self.inner))?;
-        Ok(IdbKeyRange::bound(&lower, &upper).expect("construct key range"))
-    }
-
-    pub fn encode_key_range_from_to<T, K>(
-        &self,
-        room_id: &RoomId,
-        lower: &K::KeyComponents,
-        upper: &K::KeyComponents,
-    ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error>
-    where
-        T: Indexed,
-        K: IndexedKeyBounds<T> + Serialize,
-    {
-        let lower = serde_wasm_bindgen::to_value(&K::encode(room_id, lower, &self.inner))?;
-        let upper = serde_wasm_bindgen::to_value(&K::encode(room_id, upper, &self.inner))?;
-        Ok(IdbKeyRange::bound(&lower, &upper)?)
+        Ok(match range.into() {
+            IndexedKeyRange::Only(key) => {
+                let key = serde_wasm_bindgen::to_value(&K::encode(room_id, key, &self.inner))?;
+                IdbKeyRange::only(&key)?
+            }
+            IndexedKeyRange::Bound(lower, upper) => {
+                let lower = serde_wasm_bindgen::to_value(&K::encode(room_id, lower, &self.inner))?;
+                let upper = serde_wasm_bindgen::to_value(&K::encode(room_id, upper, &self.inner))?;
+                IdbKeyRange::bound(&lower, &upper)?
+            }
+            IndexedKeyRange::All => {
+                let lower = serde_wasm_bindgen::to_value(&K::lower_key(room_id, &self.inner))?;
+                let upper = serde_wasm_bindgen::to_value(&K::upper_key(room_id, &self.inner))?;
+                IdbKeyRange::bound(&lower, &upper).expect("construct key range")
+            }
+        })
     }
 }

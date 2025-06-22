@@ -550,7 +550,7 @@ impl_event_cache_store! {
                 for relation_type in relation_types {
                     let relation = (event_id.to_owned(), relation_type.clone());
                     let events =
-                        transaction.get_events_by_relation(room_id, &relation, &relation).await?;
+                        transaction.get_events_by_relation(room_id, &relation).await?;
                     for event in events {
                         related_events.push(event.take_content());
                     }

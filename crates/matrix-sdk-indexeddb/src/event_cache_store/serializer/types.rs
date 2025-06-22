@@ -92,6 +92,25 @@ pub trait IndexedKeyBounds<T: Indexed>: IndexedKey<T> + Sized {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum IndexedKeyRange<K> {
+    Only(K),
+    Bound(K, K),
+    All,
+}
+
+impl<K> From<(K, K)> for IndexedKeyRange<K> {
+    fn from(value: (K, K)) -> Self {
+        Self::Bound(value.0, value.1)
+    }
+}
+
+impl<K> From<K> for IndexedKeyRange<K> {
+    fn from(value: K) -> Self {
+        Self::Only(value)
+    }
+}
+
 /// A type that wraps a (de)serialized value `value` and associates it
 /// with an identifier, `id`.
 ///
