@@ -17,19 +17,30 @@ pub mod types;
 use gloo_utils::format::JsValueSerdeExt;
 use ruma::RoomId;
 use serde::{de::DeserializeOwned, Serialize};
+use thiserror::Error;
 use wasm_bindgen::JsValue;
 use web_sys::IdbKeyRange;
 
 use crate::{
-    event_cache_store::{
-        serializer::types::{
-            Indexed, IndexedEventPositionKey, IndexedKey, IndexedKeyBounds, IndexedPartialKeyBounds,
-        },
-        types::{Event, Position},
+    event_cache_store::serializer::types::{
+        Indexed, IndexedKey, IndexedKeyBounds, IndexedPartialKeyBounds,
     },
-    serializer::IndexeddbSerializer,
-    IndexeddbEventCacheStoreError,
+    serializer::{IndexeddbSerializer, IndexeddbSerializerError},
 };
+
+#[derive(Debug, Error)]
+pub enum IndexeddbEventCacheStoreSerializerError<IndexingError> {
+    #[error("indexing: {0}")]
+    Indexing(IndexingError),
+    #[error("serialization: {0}")]
+    Serialization(#[from] serde_json::Error),
+}
+
+impl<T> From<serde_wasm_bindgen::Error> for IndexeddbEventCacheStoreSerializerError<T> {
+    fn from(e: serde_wasm_bindgen::Error) -> Self {
+        Self::Serialization(serde::de::Error::custom(e.to_string()))
+    }
+}
 
 #[derive(Debug)]
 pub struct IndexeddbEventCacheStoreSerializer {
@@ -44,8 +55,8 @@ impl IndexeddbEventCacheStoreSerializer {
     pub fn serialize_value(
         &self,
         value: &impl Serialize,
-    ) -> Result<JsValue, IndexeddbEventCacheStoreError> {
-        self.inner.serialize_value(value).map_err(Into::into)
+    ) -> Result<JsValue, IndexeddbEventCacheStoreSerializerError<IndexeddbSerializerError>> {
+        self.inner.serialize_value(value).map_err(IndexeddbEventCacheStoreSerializerError::Indexing)
     }
 
     /// Decode a value that was previously encoded with
@@ -53,32 +64,38 @@ impl IndexeddbEventCacheStoreSerializer {
     pub fn deserialize_value<T: DeserializeOwned>(
         &self,
         value: JsValue,
-    ) -> Result<T, IndexeddbEventCacheStoreError> {
-        self.inner.deserialize_value(value).map_err(Into::into)
+    ) -> Result<T, IndexeddbEventCacheStoreSerializerError<IndexeddbSerializerError>> {
+        self.inner
+            .deserialize_value(value)
+            .map_err(IndexeddbEventCacheStoreSerializerError::Indexing)
     }
 
     pub fn serialize<T>(
         &self,
         room_id: &RoomId,
         t: &T,
-    ) -> Result<JsValue, IndexeddbEventCacheStoreError>
+    ) -> Result<JsValue, IndexeddbEventCacheStoreSerializerError<T::Error>>
     where
         T: Indexed,
         T::IndexedType: Serialize,
-        T::Error: Into<IndexeddbEventCacheStoreError>,
     {
-        let indexed = t.to_indexed(room_id, &self.inner).map_err(Into::into)?;
+        let indexed = t
+            .to_indexed(room_id, &self.inner)
+            .map_err(IndexeddbEventCacheStoreSerializerError::Indexing)?;
         serde_wasm_bindgen::to_value(&indexed).map_err(Into::into)
     }
 
-    pub fn deserialize<T>(&self, value: JsValue) -> Result<T, IndexeddbEventCacheStoreError>
+    pub fn deserialize<T>(
+        &self,
+        value: JsValue,
+    ) -> Result<T, IndexeddbEventCacheStoreSerializerError<T::Error>>
     where
         T: Indexed,
         T::IndexedType: DeserializeOwned,
-        T::Error: Into<IndexeddbEventCacheStoreError>,
     {
         let indexed: T::IndexedType = value.into_serde()?;
-        T::from_indexed(indexed, &self.inner).map_err(Into::into)
+        T::from_indexed(indexed, &self.inner)
+            .map_err(IndexeddbEventCacheStoreSerializerError::Indexing)
     }
 
     pub fn encode_key<T, K>(&self, room_id: &RoomId, components: &K::KeyComponents) -> K
@@ -149,35 +166,5 @@ impl IndexeddbEventCacheStoreSerializer {
             &self.inner,
         ))?;
         Ok(IdbKeyRange::bound(&lower, &upper)?)
-    }
-
-    pub fn encode_event_position_range_for_chunk(
-        &self,
-        room_id: &RoomId,
-        chunk_id: u64,
-    ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error> {
-        self.encode_key_range_from_to::<Event, IndexedEventPositionKey>(
-            room_id,
-            &Position { chunk_identifier: chunk_id, index: 0 },
-            &Position {
-                chunk_identifier: chunk_id,
-                index: js_sys::Number::MAX_SAFE_INTEGER as usize,
-            },
-        )
-    }
-
-    pub fn encode_event_position_range_for_chunk_from(
-        &self,
-        room_id: &RoomId,
-        position: &Position,
-    ) -> Result<IdbKeyRange, IndexeddbEventCacheStoreError> {
-        Ok(self.encode_key_range_from_to::<Event, IndexedEventPositionKey>(
-            room_id,
-            position,
-            &Position {
-                chunk_identifier: position.chunk_identifier,
-                index: js_sys::Number::MAX_SAFE_INTEGER as usize,
-            },
-        )?)
     }
 }
