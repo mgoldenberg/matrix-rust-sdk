@@ -166,10 +166,6 @@ pub struct IndexeddbEventCacheStore {
 }
 
 impl IndexeddbEventCacheStore {
-    pub const KEY_SEPARATOR: char = '\u{001D}';
-    pub const KEY_LOWER_CHARACTER: char = '\u{0000}';
-    pub const KEY_UPPER_CHARACTER: char = '\u{FFFF}';
-
     pub fn builder() -> IndexeddbEventCacheStoreBuilder {
         IndexeddbEventCacheStoreBuilder::new()
     }

@@ -29,7 +29,7 @@
 
 use matrix_sdk_base::linked_chunk::ChunkIdentifier;
 use matrix_sdk_crypto::CryptoStoreError;
-use ruma::{events::relation::RelationType, owned_event_id, OwnedEventId, RoomId};
+use ruma::{events::relation::RelationType, OwnedEventId, RoomId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -368,11 +368,11 @@ impl IndexedKey<Event> for IndexedEventIdKey {
 
 impl IndexedKeyBounds<Event> for IndexedEventIdKey {
     fn lower_key_components() -> Self::KeyComponents {
-        owned_event_id!("$\u{0000}")
+        OwnedEventId::try_from(format!("${INDEXED_KEY_LOWER_CHARACTER}")).expect("valid event id")
     }
 
     fn upper_key_components() -> Self::KeyComponents {
-        owned_event_id!("$\u{FFFF}")
+        OwnedEventId::try_from(format!("${INDEXED_KEY_UPPER_CHARACTER}")).expect("valid event id")
     }
 }
 
@@ -461,11 +461,19 @@ impl IndexedKey<Event> for IndexedEventRelationKey {
 
 impl IndexedKeyBounds<Event> for IndexedEventRelationKey {
     fn lower_key_components() -> Self::KeyComponents {
-        (owned_event_id!("$\u{0000}"), RelationType::from(INDEXED_KEY_LOWER_CHARACTER.to_string()))
+        (
+            OwnedEventId::try_from(format!("${INDEXED_KEY_LOWER_CHARACTER}"))
+                .expect("valid event id"),
+            RelationType::from(INDEXED_KEY_LOWER_CHARACTER.to_string()),
+        )
     }
 
     fn upper_key_components() -> Self::KeyComponents {
-        (owned_event_id!("$\u{0000}"), RelationType::from(INDEXED_KEY_UPPER_CHARACTER.to_string()))
+        (
+            OwnedEventId::try_from(format!("${INDEXED_KEY_UPPER_CHARACTER}"))
+                .expect("valid event id"),
+            RelationType::from(INDEXED_KEY_UPPER_CHARACTER.to_string()),
+        )
     }
 }
 
