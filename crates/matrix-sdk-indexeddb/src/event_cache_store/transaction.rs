@@ -11,10 +11,10 @@ use web_sys::IdbCursorDirection;
 use crate::event_cache_store::{
     error::AsyncErrorDeps,
     serializer::{
+        traits::{Indexed, IndexedKey, IndexedKeyBounds},
         types::{
-            Indexed, IndexedChunkIdKey, IndexedEventIdKey, IndexedEventPositionKey,
-            IndexedEventRelationKey, IndexedGapIdKey, IndexedKey, IndexedKeyBounds,
-            IndexedKeyRange, IndexedNextChunkIdKey,
+            IndexedChunkIdKey, IndexedEventIdKey, IndexedEventPositionKey, IndexedEventRelationKey,
+            IndexedGapIdKey, IndexedKeyRange, IndexedNextChunkIdKey,
         },
         IndexeddbEventCacheStoreSerializer,
     },

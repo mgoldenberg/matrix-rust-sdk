@@ -36,7 +36,7 @@ use matrix_sdk_base::{
     media::MediaRequestParameters,
 };
 use matrix_sdk_crypto::CryptoStoreError;
-use migrations::keys;
+use migrations::current::keys;
 use ruma::{
     events::relation::RelationType, EventId, MilliSecondsSinceUnixEpoch, MxcUri, OwnedEventId,
     RoomId,
@@ -114,7 +114,9 @@ impl From<IndexeddbEventCacheStoreError> for EventCacheStoreError {
         match e {
             IndexeddbEventCacheStoreError::MediaStore(e) => e,
             IndexeddbEventCacheStoreError::Json(e) => EventCacheStoreError::Serialization(e),
-            _ => EventCacheStoreError::backend(e),
+            // TODO: This should use `EventCacheStoreError::backend()` but that requires `Send` and
+            // `Sync` which should not apply in `wasm` targets
+            _ => EventCacheStoreError::InvalidData { details: e.to_string() },
         }
     }
 }

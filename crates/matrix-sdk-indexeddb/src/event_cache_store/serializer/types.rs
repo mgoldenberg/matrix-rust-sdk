@@ -35,62 +35,12 @@ use thiserror::Error;
 
 use crate::{
     event_cache_store::{
-        migrations::keys,
-        types::{Chunk, Event, Gap, InBandEvent, Position},
+        migrations::current::keys,
+        serializer::traits::{Indexed, IndexedKey, IndexedKeyBounds},
+        types::{Chunk, Event, Gap, Position},
     },
     serializer::{IndexeddbSerializer, MaybeEncrypted},
 };
-
-pub trait Indexed: Sized {
-    const OBJECT_STORE: &'static str;
-
-    type IndexedType;
-    type Error;
-
-    fn to_indexed(
-        &self,
-        room_id: &RoomId,
-        serializer: &IndexeddbSerializer,
-    ) -> Result<Self::IndexedType, Self::Error>;
-
-    fn from_indexed(
-        indexed: Self::IndexedType,
-        serializer: &IndexeddbSerializer,
-    ) -> Result<Self, Self::Error>;
-}
-
-pub trait IndexedKey<T: Indexed> {
-    const PATH: &'static str;
-
-    type KeyComponents;
-
-    fn index() -> Option<&'static str> {
-        None
-    }
-
-    fn encode(
-        room_id: &RoomId,
-        components: &Self::KeyComponents,
-        serializer: &IndexeddbSerializer,
-    ) -> Self;
-}
-
-const INDEXED_KEY_LOWER_CHARACTER: char = '\u{0000}';
-const INDEXED_KEY_UPPER_CHARACTER: char = '\u{FFFF}';
-
-pub trait IndexedKeyBounds<T: Indexed>: IndexedKey<T> + Sized {
-    fn lower_key_components() -> Self::KeyComponents;
-
-    fn lower_key(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
-        <Self as IndexedKey<T>>::encode(room_id, &Self::lower_key_components(), serializer)
-    }
-
-    fn upper_key_components() -> Self::KeyComponents;
-
-    fn upper_key(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
-        <Self as IndexedKey<T>>::encode(room_id, &Self::upper_key_components(), serializer)
-    }
-}
 
 #[derive(Debug, Copy, Clone)]
 pub enum IndexedKeyRange<K> {
@@ -122,6 +72,23 @@ pub struct ValueWithId {
     pub id: String,
     pub value: MaybeEncrypted,
 }
+/// The first unicode character, and hence the lower bound for IndexedDB keys
+/// (or key components) which are represented as strings.
+///
+/// This value is useful for constructing a key range over all strings when used
+/// in conjunction with [`INDEXED_KEY_UPPER_CHARACTER`].
+const INDEXED_KEY_LOWER_CHARACTER: char = '\u{0000}';
+
+/// The last unicode character in the [Basic Multilingual Plane][1]. This seems
+/// like a reasonable place to set the upper bound for IndexedDB keys (or key
+/// components) which are represented as strings, though one could
+/// theoretically set it to `\u{10FFFF}`.
+///
+/// This value is useful for constructing a key range over all strings when used
+/// in conjunction with [`INDEXED_KEY_LOWER_CHARACTER`].
+///
+/// [1]: https://en.wikipedia.org/wiki/Plane_(Unicode)#Basic_Multilingual_Plane
+const INDEXED_KEY_UPPER_CHARACTER: char = '\u{FFFF}';
 
 /// Represents the [`LINKED_CHUNKS`][1] object store.
 ///
@@ -192,7 +159,7 @@ impl IndexedKey<Chunk> for IndexedChunkIdKey {
         chunk_id: &ChunkIdentifier,
         serializer: &IndexeddbSerializer,
     ) -> Self {
-        let room_id = serializer.encode_key_as_string(keys::LINKED_CHUNKS, room_id);
+        let room_id = serializer.encode_key_as_string(keys::ROOMS, room_id);
         let chunk_id = chunk_id.index();
         Self(room_id, chunk_id)
     }
@@ -236,6 +203,12 @@ pub enum IndexedNextChunkIdKey {
     Some(IndexedChunkIdKey),
 }
 
+impl IndexedNextChunkIdKey {
+    pub fn none(room_id: IndexedRoomId) -> Self {
+        Self::None((room_id,))
+    }
+}
+
 impl IndexedKey<Chunk> for IndexedNextChunkIdKey {
     const PATH: &'static str = keys::LINKED_CHUNKS_NEXT_KEY_PATH;
 
@@ -257,8 +230,8 @@ impl IndexedKey<Chunk> for IndexedNextChunkIdKey {
                 ))
             })
             .unwrap_or_else(|| {
-                let room_id = serializer.encode_key_as_string(keys::LINKED_CHUNKS, room_id);
-                Self::None((room_id,))
+                let room_id = serializer.encode_key_as_string(keys::ROOMS, room_id);
+                Self::none(room_id)
             })
     }
 }
@@ -313,38 +286,6 @@ impl Indexed for Event {
         let position = self
             .position()
             .map(|position| IndexedEventPositionKey::encode(room_id, &position, serializer));
-        let relation = self.relation().map(|(related_event, relation_type)| {
-            IndexedEventRelationKey::encode(
-                room_id,
-                &(related_event, RelationType::from(relation_type)),
-                serializer,
-            )
-        });
-        Ok(IndexedEvent { id, position, relation, content: serializer.maybe_encrypt_value(self)? })
-    }
-
-    fn from_indexed(
-        indexed: Self::IndexedType,
-        serializer: &IndexeddbSerializer,
-    ) -> Result<Self, Self::Error> {
-        serializer.maybe_decrypt_value(indexed.content).map_err(Into::into)
-    }
-}
-
-impl Indexed for InBandEvent {
-    const OBJECT_STORE: &'static str = keys::EVENTS;
-
-    type IndexedType = IndexedEvent;
-    type Error = IndexedEventError;
-
-    fn to_indexed(
-        &self,
-        room_id: &RoomId,
-        serializer: &IndexeddbSerializer,
-    ) -> Result<Self::IndexedType, Self::Error> {
-        let event_id = self.content.event_id().ok_or(Self::Error::NoEventId)?;
-        let id = IndexedEventIdKey::encode(room_id, &event_id, serializer);
-        let position = Some(IndexedEventPositionKey::encode(room_id, &self.position, serializer));
         let relation = self.relation().map(|(related_event, relation_type)| {
             IndexedEventRelationKey::encode(
                 room_id,

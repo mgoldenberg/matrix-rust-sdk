@@ -37,7 +37,7 @@ use tracing::{debug, instrument, warn};
 
 use super::{
     send_queue::{ChildTransactionId, QueuedRequest, SentRequestKey},
-    traits::{ComposerDraft, ServerCapabilities},
+    traits::{ComposerDraft, ServerInfo},
     DependentQueuedRequest, DependentQueuedRequestKind, QueuedRequestKind, Result, RoomInfo,
     RoomLoadSettings, StateChanges, StateStore, StoreError,
 };
@@ -51,10 +51,10 @@ use crate::{
 #[allow(clippy::type_complexity)]
 struct MemoryStoreInner {
     recently_visited_rooms: HashMap<OwnedUserId, Vec<OwnedRoomId>>,
-    composer_drafts: HashMap<OwnedRoomId, ComposerDraft>,
+    composer_drafts: HashMap<(OwnedRoomId, Option<OwnedEventId>), ComposerDraft>,
     user_avatar_url: HashMap<OwnedUserId, OwnedMxcUri>,
     sync_token: Option<String>,
-    server_capabilities: Option<ServerCapabilities>,
+    server_info: Option<ServerInfo>,
     filters: HashMap<String, String>,
     utd_hook_manager_data: Option<GrowableBloom>,
     account_data: HashMap<GlobalAccountDataEventType, Raw<AnyGlobalAccountDataEvent>>,
@@ -149,8 +149,8 @@ impl StateStore for MemoryStore {
             StateStoreDataKey::SyncToken => {
                 inner.sync_token.clone().map(StateStoreDataValue::SyncToken)
             }
-            StateStoreDataKey::ServerCapabilities => {
-                inner.server_capabilities.clone().map(StateStoreDataValue::ServerCapabilities)
+            StateStoreDataKey::ServerInfo => {
+                inner.server_info.clone().map(StateStoreDataValue::ServerInfo)
             }
             StateStoreDataKey::Filter(filter_name) => {
                 inner.filters.get(filter_name).cloned().map(StateStoreDataValue::Filter)
@@ -166,8 +166,9 @@ impl StateStore for MemoryStore {
             StateStoreDataKey::UtdHookManagerData => {
                 inner.utd_hook_manager_data.clone().map(StateStoreDataValue::UtdHookManagerData)
             }
-            StateStoreDataKey::ComposerDraft(room_id) => {
-                inner.composer_drafts.get(room_id).cloned().map(StateStoreDataValue::ComposerDraft)
+            StateStoreDataKey::ComposerDraft(room_id, thread_root) => {
+                let key = (room_id.to_owned(), thread_root.map(ToOwned::to_owned));
+                inner.composer_drafts.get(&key).cloned().map(StateStoreDataValue::ComposerDraft)
             }
             StateStoreDataKey::SeenKnockRequests(room_id) => inner
                 .seen_knock_requests
@@ -215,17 +216,15 @@ impl StateStore for MemoryStore {
                         .expect("Session data not the hook manager data"),
                 );
             }
-            StateStoreDataKey::ComposerDraft(room_id) => {
+            StateStoreDataKey::ComposerDraft(room_id, thread_root) => {
                 inner.composer_drafts.insert(
-                    room_id.to_owned(),
+                    (room_id.to_owned(), thread_root.map(ToOwned::to_owned)),
                     value.into_composer_draft().expect("Session data not a composer draft"),
                 );
             }
-            StateStoreDataKey::ServerCapabilities => {
-                inner.server_capabilities = Some(
-                    value
-                        .into_server_capabilities()
-                        .expect("Session data not containing server capabilities"),
+            StateStoreDataKey::ServerInfo => {
+                inner.server_info = Some(
+                    value.into_server_info().expect("Session data not containing server info"),
                 );
             }
             StateStoreDataKey::SeenKnockRequests(room_id) => {
@@ -245,7 +244,7 @@ impl StateStore for MemoryStore {
         let mut inner = self.inner.write().unwrap();
         match key {
             StateStoreDataKey::SyncToken => inner.sync_token = None,
-            StateStoreDataKey::ServerCapabilities => inner.server_capabilities = None,
+            StateStoreDataKey::ServerInfo => inner.server_info = None,
             StateStoreDataKey::Filter(filter_name) => {
                 inner.filters.remove(filter_name);
             }
@@ -256,8 +255,9 @@ impl StateStore for MemoryStore {
                 inner.recently_visited_rooms.remove(user_id);
             }
             StateStoreDataKey::UtdHookManagerData => inner.utd_hook_manager_data = None,
-            StateStoreDataKey::ComposerDraft(room_id) => {
-                inner.composer_drafts.remove(room_id);
+            StateStoreDataKey::ComposerDraft(room_id, thread_root) => {
+                let key = (room_id.to_owned(), thread_root.map(ToOwned::to_owned));
+                inner.composer_drafts.remove(&key);
             }
             StateStoreDataKey::SeenKnockRequests(room_id) => {
                 inner.seen_knock_requests.remove(room_id);

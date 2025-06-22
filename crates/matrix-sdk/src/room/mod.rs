@@ -113,10 +113,10 @@ use ruma::{
         tag::{TagInfo, TagName},
         typing::SyncTypingEvent,
         AnyRoomAccountDataEvent, AnyRoomAccountDataEventContent, AnyTimelineEvent, EmptyStateKey,
-        Mentions, MessageLikeEventContent, MessageLikeEventType, OriginalSyncStateEvent,
-        RedactContent, RedactedStateEventContent, RoomAccountDataEvent,
-        RoomAccountDataEventContent, RoomAccountDataEventType, StateEventContent, StateEventType,
-        StaticEventContent, StaticStateEventContent, SyncStateEvent,
+        Mentions, MessageLikeEventContent, OriginalSyncStateEvent, RedactContent,
+        RedactedStateEventContent, RoomAccountDataEvent, RoomAccountDataEventContent,
+        RoomAccountDataEventType, StateEventContent, StateEventType, StaticEventContent,
+        StaticStateEventContent, SyncStateEvent,
     },
     push::{Action, PushConditionRoomCtx, Ruleset},
     serde::Raw,
@@ -375,6 +375,7 @@ impl Room {
     ///
     /// Only invited and left rooms can be joined via this method.
     #[doc(alias = "accept_invitation")]
+    #[instrument(skip_all, fields(room_id = ?self.inner.room_id()))]
     pub async fn join(&self) -> Result<()> {
         let prev_room_state = self.inner.state();
 
@@ -397,18 +398,27 @@ impl Room {
             None
         };
 
+        #[cfg(feature = "e2e-encryption")]
+        let enable_share_history_on_invite = self.client.inner.enable_share_history_on_invite;
+
+        #[cfg(not(feature = "e2e-encryption"))]
+        let enable_share_history_on_invite = false;
+
+        debug!(
+            ?prev_room_state,
+            inviter=?inviter.as_ref().map(|room_member| room_member.user_id()),
+            enable_share_history_on_invite,
+            "Joining room",
+        );
+
         self.client.join_room_by_id(self.room_id()).await?;
 
         #[cfg(feature = "e2e-encryption")]
-        if self.client.inner.enable_share_history_on_invite {
+        if enable_share_history_on_invite {
             if let Some(inviter) = inviter {
                 shared_room_history::maybe_accept_key_bundle(self, inviter.user_id()).await?;
             }
         }
-
-        #[cfg(not(feature = "e2e-encryption"))]
-        // Suppress "unused variable" lint
-        let _inviter = inviter;
 
         Ok(())
     }
@@ -2759,89 +2769,6 @@ impl Room {
         self.client.send(request).await
     }
 
-    /// Returns true if the user with the given user_id is able to redact
-    /// their own messages in the room.
-    ///
-    /// The call may fail if there is an error in getting the power levels.
-    pub async fn can_user_redact_own(&self, user_id: &UserId) -> Result<bool> {
-        Ok(self.power_levels().await?.user_can_redact_own_event(user_id))
-    }
-
-    /// Returns true if the user with the given user_id is able to redact
-    /// messages of other users in the room.
-    ///
-    /// The call may fail if there is an error in getting the power levels.
-    pub async fn can_user_redact_other(&self, user_id: &UserId) -> Result<bool> {
-        Ok(self.power_levels().await?.user_can_redact_event_of_other(user_id))
-    }
-
-    /// Returns true if the user with the given user_id is able to ban in the
-    /// room.
-    ///
-    /// The call may fail if there is an error in getting the power levels.
-    pub async fn can_user_ban(&self, user_id: &UserId) -> Result<bool> {
-        Ok(self.power_levels().await?.user_can_ban(user_id))
-    }
-
-    /// Returns true if the user with the given user_id is able to kick in the
-    /// room.
-    ///
-    /// The call may fail if there is an error in getting the power levels.
-    pub async fn can_user_invite(&self, user_id: &UserId) -> Result<bool> {
-        Ok(self.power_levels().await?.user_can_invite(user_id))
-    }
-
-    /// Returns true if the user with the given user_id is able to kick in the
-    /// room.
-    ///
-    /// The call may fail if there is an error in getting the power levels.
-    pub async fn can_user_kick(&self, user_id: &UserId) -> Result<bool> {
-        Ok(self.power_levels().await?.user_can_kick(user_id))
-    }
-
-    /// Returns true if the user with the given user_id is able to send a
-    /// specific state event type in the room.
-    ///
-    /// The call may fail if there is an error in getting the power levels.
-    pub async fn can_user_send_state(
-        &self,
-        user_id: &UserId,
-        state_event: StateEventType,
-    ) -> Result<bool> {
-        Ok(self.power_levels().await?.user_can_send_state(user_id, state_event))
-    }
-
-    /// Returns true if the user with the given user_id is able to send a
-    /// specific message type in the room.
-    ///
-    /// The call may fail if there is an error in getting the power levels.
-    pub async fn can_user_send_message(
-        &self,
-        user_id: &UserId,
-        message: MessageLikeEventType,
-    ) -> Result<bool> {
-        Ok(self.power_levels().await?.user_can_send_message(user_id, message))
-    }
-
-    /// Returns true if the user with the given user_id is able to pin or unpin
-    /// events in the room.
-    ///
-    /// The call may fail if there is an error in getting the power levels.
-    pub async fn can_user_pin_unpin(&self, user_id: &UserId) -> Result<bool> {
-        Ok(self
-            .power_levels()
-            .await?
-            .user_can_send_state(user_id, StateEventType::RoomPinnedEvents))
-    }
-
-    /// Returns true if the user with the given user_id is able to trigger a
-    /// notification in the room.
-    ///
-    /// The call may fail if there is an error in getting the power levels.
-    pub async fn can_user_trigger_room_notification(&self, user_id: &UserId) -> Result<bool> {
-        Ok(self.power_levels().await?.user_can_trigger_room_notification(user_id))
-    }
-
     /// Get a list of servers that should know this room.
     ///
     /// Uses the synced members of the room and the suggested [routing
@@ -3330,7 +3257,10 @@ impl Room {
             return Ok(false);
         }
 
-        if !self.can_user_trigger_room_notification(self.own_user_id()).await? {
+        let can_user_trigger_room_notification =
+            self.power_levels().await?.user_can_trigger_room_notification(self.own_user_id());
+
+        if !can_user_trigger_room_notification {
             warn!(
                 "User can't send notifications to everyone in the room {}. \
                 Not sending a new notify event.",
@@ -3479,33 +3409,42 @@ impl Room {
     }
 
     /// Store the given `ComposerDraft` in the state store using the current
-    /// room id, as identifier.
-    pub async fn save_composer_draft(&self, draft: ComposerDraft) -> Result<()> {
+    /// room id and optional thread root id as identifier.
+    pub async fn save_composer_draft(
+        &self,
+        draft: ComposerDraft,
+        thread_root: Option<&EventId>,
+    ) -> Result<()> {
         self.client
             .state_store()
             .set_kv_data(
-                StateStoreDataKey::ComposerDraft(self.room_id()),
+                StateStoreDataKey::ComposerDraft(self.room_id(), thread_root),
                 StateStoreDataValue::ComposerDraft(draft),
             )
             .await?;
         Ok(())
     }
 
-    /// Retrieve the `ComposerDraft` stored in the state store for this room.
-    pub async fn load_composer_draft(&self) -> Result<Option<ComposerDraft>> {
+    /// Retrieve the `ComposerDraft` stored in the state store for this room
+    /// and given thread, if any.
+    pub async fn load_composer_draft(
+        &self,
+        thread_root: Option<&EventId>,
+    ) -> Result<Option<ComposerDraft>> {
         let data = self
             .client
             .state_store()
-            .get_kv_data(StateStoreDataKey::ComposerDraft(self.room_id()))
+            .get_kv_data(StateStoreDataKey::ComposerDraft(self.room_id(), thread_root))
             .await?;
         Ok(data.and_then(|d| d.into_composer_draft()))
     }
 
-    /// Remove the `ComposerDraft` stored in the state store for this room.
-    pub async fn clear_composer_draft(&self) -> Result<()> {
+    /// Remove the `ComposerDraft` stored in the state store for this room
+    /// and given thread, if any.
+    pub async fn clear_composer_draft(&self, thread_root: Option<&EventId>) -> Result<()> {
         self.client
             .state_store()
-            .remove_kv_data(StateStoreDataKey::ComposerDraft(self.room_id()))
+            .remove_kv_data(StateStoreDataKey::ComposerDraft(self.room_id(), thread_root))
             .await?;
         Ok(())
     }
@@ -4235,18 +4174,46 @@ mod tests {
         client.base_client().receive_sync_response(response).await.unwrap();
         let room = client.get_room(&DEFAULT_TEST_ROOM_ID).expect("Room should exist");
 
-        assert_eq!(room.load_composer_draft().await.unwrap(), None);
+        assert_eq!(room.load_composer_draft(None).await.unwrap(), None);
+
+        // Save 2 drafts, one for the room and one for a thread.
 
         let draft = ComposerDraft {
             plain_text: "Hello, world!".to_owned(),
             html_text: Some("<strong>Hello</strong>, world!".to_owned()),
             draft_type: ComposerDraftType::NewMessage,
         };
-        room.save_composer_draft(draft.clone()).await.unwrap();
-        assert_eq!(room.load_composer_draft().await.unwrap(), Some(draft));
 
-        room.clear_composer_draft().await.unwrap();
-        assert_eq!(room.load_composer_draft().await.unwrap(), None);
+        room.save_composer_draft(draft.clone(), None).await.unwrap();
+
+        let thread_root = owned_event_id!("$thread_root:b.c");
+        let thread_draft = ComposerDraft {
+            plain_text: "Hello, thread!".to_owned(),
+            html_text: Some("<strong>Hello</strong>, thread!".to_owned()),
+            draft_type: ComposerDraftType::NewMessage,
+        };
+
+        room.save_composer_draft(thread_draft.clone(), Some(&thread_root)).await.unwrap();
+
+        // Check that the room draft was saved correctly
+        assert_eq!(room.load_composer_draft(None).await.unwrap(), Some(draft));
+
+        // Check that the thread draft was saved correctly
+        assert_eq!(
+            room.load_composer_draft(Some(&thread_root)).await.unwrap(),
+            Some(thread_draft.clone())
+        );
+
+        // Clear the room draft
+        room.clear_composer_draft(None).await.unwrap();
+        assert_eq!(room.load_composer_draft(None).await.unwrap(), None);
+
+        // Check that the thread one is still there
+        assert_eq!(room.load_composer_draft(Some(&thread_root)).await.unwrap(), Some(thread_draft));
+
+        // Clear the thread draft as well
+        room.clear_composer_draft(Some(&thread_root)).await.unwrap();
+        assert_eq!(room.load_composer_draft(Some(&thread_root)).await.unwrap(), None);
     }
 
     #[async_test]

@@ -241,13 +241,17 @@ pub struct PollAnswer {
 #[derive(Clone, uniffi::Object)]
 pub struct ThreadSummary {
     pub latest_event: EmbeddedEventDetails,
-    pub num_replies: usize,
+    pub num_replies: u32,
 }
 
 #[matrix_sdk_ffi_macros::export]
 impl ThreadSummary {
     pub fn latest_event(&self) -> EmbeddedEventDetails {
         self.latest_event.clone()
+    }
+
+    pub fn num_replies(&self) -> u64 {
+        self.num_replies as u64
     }
 }
 

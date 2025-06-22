@@ -27,7 +27,7 @@ use matrix_sdk_base::{
     store::{
         ChildTransactionId, ComposerDraft, DependentQueuedRequest, DependentQueuedRequestKind,
         QueuedRequest, QueuedRequestKind, RoomLoadSettings, SentRequestKey,
-        SerializableEventContent, ServerCapabilities, StateChanges, StateStore, StoreError,
+        SerializableEventContent, ServerInfo, StateChanges, StateStore, StoreError,
     },
     MinimalRoomMemberEvent, RoomInfo, RoomMemberships, StateStoreDataKey, StateStoreDataValue,
 };
@@ -400,10 +400,9 @@ impl IndexeddbStateStore {
             StateStoreDataKey::SyncToken => {
                 self.encode_key(StateStoreDataKey::SYNC_TOKEN, StateStoreDataKey::SYNC_TOKEN)
             }
-            StateStoreDataKey::ServerCapabilities => self.encode_key(
-                StateStoreDataKey::SERVER_CAPABILITIES,
-                StateStoreDataKey::SERVER_CAPABILITIES,
-            ),
+            StateStoreDataKey::ServerInfo => {
+                self.encode_key(StateStoreDataKey::SERVER_INFO, StateStoreDataKey::SERVER_INFO)
+            }
             StateStoreDataKey::Filter(filter_name) => {
                 self.encode_key(StateStoreDataKey::FILTER, (StateStoreDataKey::FILTER, filter_name))
             }
@@ -416,8 +415,15 @@ impl IndexeddbStateStore {
             StateStoreDataKey::UtdHookManagerData => {
                 self.encode_key(keys::KV, StateStoreDataKey::UTD_HOOK_MANAGER_DATA)
             }
-            StateStoreDataKey::ComposerDraft(room_id) => {
-                self.encode_key(keys::KV, (StateStoreDataKey::COMPOSER_DRAFT, room_id))
+            StateStoreDataKey::ComposerDraft(room_id, thread_root) => {
+                if let Some(thread_root) = thread_root {
+                    self.encode_key(
+                        keys::KV,
+                        (StateStoreDataKey::COMPOSER_DRAFT, (room_id, thread_root)),
+                    )
+                } else {
+                    self.encode_key(keys::KV, (StateStoreDataKey::COMPOSER_DRAFT, room_id))
+                }
             }
             StateStoreDataKey::SeenKnockRequests(room_id) => {
                 self.encode_key(keys::KV, (StateStoreDataKey::SEEN_KNOCK_REQUESTS, room_id))
@@ -530,10 +536,10 @@ impl_state_store!({
                 .map(|f| self.deserialize_value::<String>(&f))
                 .transpose()?
                 .map(StateStoreDataValue::SyncToken),
-            StateStoreDataKey::ServerCapabilities => value
-                .map(|f| self.deserialize_value::<ServerCapabilities>(&f))
+            StateStoreDataKey::ServerInfo => value
+                .map(|f| self.deserialize_value::<ServerInfo>(&f))
                 .transpose()?
-                .map(StateStoreDataValue::ServerCapabilities),
+                .map(StateStoreDataValue::ServerInfo),
             StateStoreDataKey::Filter(_) => value
                 .map(|f| self.deserialize_value::<String>(&f))
                 .transpose()?
@@ -550,7 +556,7 @@ impl_state_store!({
                 .map(|f| self.deserialize_value::<GrowableBloom>(&f))
                 .transpose()?
                 .map(StateStoreDataValue::UtdHookManagerData),
-            StateStoreDataKey::ComposerDraft(_) => value
+            StateStoreDataKey::ComposerDraft(_, _) => value
                 .map(|f| self.deserialize_value::<ComposerDraft>(&f))
                 .transpose()?
                 .map(StateStoreDataValue::ComposerDraft),
@@ -573,10 +579,8 @@ impl_state_store!({
         let serialized_value = match key {
             StateStoreDataKey::SyncToken => self
                 .serialize_value(&value.into_sync_token().expect("Session data not a sync token")),
-            StateStoreDataKey::ServerCapabilities => self.serialize_value(
-                &value
-                    .into_server_capabilities()
-                    .expect("Session data not containing server capabilities"),
+            StateStoreDataKey::ServerInfo => self.serialize_value(
+                &value.into_server_info().expect("Session data not containing server info"),
             ),
             StateStoreDataKey::Filter(_) => {
                 self.serialize_value(&value.into_filter().expect("Session data not a filter"))
@@ -592,7 +596,7 @@ impl_state_store!({
             StateStoreDataKey::UtdHookManagerData => self.serialize_value(
                 &value.into_utd_hook_manager_data().expect("Session data not UtdHookManagerData"),
             ),
-            StateStoreDataKey::ComposerDraft(_) => self.serialize_value(
+            StateStoreDataKey::ComposerDraft(_, _) => self.serialize_value(
                 &value.into_composer_draft().expect("Session data not a composer draft"),
             ),
             StateStoreDataKey::SeenKnockRequests(_) => self.serialize_value(

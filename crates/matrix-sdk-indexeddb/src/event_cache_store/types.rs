@@ -69,24 +69,29 @@ impl From<Event> for TimelineEvent {
 }
 
 impl Event {
+    /// The [`OwnedEventId`] of the underlying event.
     pub fn event_id(&self) -> Option<OwnedEventId> {
         match self {
-            Event::InBand(i) => i.content.event_id(),
-            Event::OutOfBand(o) => o.content.event_id(),
+            Event::InBand(e) => e.event_id(),
+            Event::OutOfBand(e) => e.event_id(),
         }
     }
 
-    pub fn relation(&self) -> Option<(OwnedEventId, String)> {
-        match self {
-            Event::InBand(i) => i.relation(),
-            Event::OutOfBand(o) => o.relation(),
-        }
-    }
-
+    /// The [`Position`] of the underlying event, if it is in a chunk.
     pub fn position(&self) -> Option<Position> {
         match self {
-            Event::InBand(i) => Some(i.position),
+            Event::InBand(e) => Some(e.position),
             Event::OutOfBand(_) => None,
+        }
+    }
+
+    /// The [`OwnedEventId`] and
+    /// [`RelationType`](ruma::events::relation::RelationType) of the underlying
+    /// event as a [`String`].
+    pub fn relation(&self) -> Option<(OwnedEventId, String)> {
+        match self {
+            Event::InBand(e) => e.relation(),
+            Event::OutOfBand(e) => e.relation(),
         }
     }
 
@@ -120,6 +125,15 @@ pub struct GenericEvent<P> {
 }
 
 impl<P> GenericEvent<P> {
+    /// The [`OwnedEventId`] of the underlying event.
+    pub fn event_id(&self) -> Option<OwnedEventId> {
+        self.content.event_id()
+    }
+
+    /// The event that the underlying event relates to, if any.
+    ///
+    /// Returns the related [`OwnedEventId`] and the
+    /// [`RelationType`](ruma::events::relation::RelationType) as a [`String`].
     pub fn relation(&self) -> Option<(OwnedEventId, String)> {
         extract_event_relation(self.content.raw())
     }
@@ -159,7 +173,7 @@ impl From<matrix_sdk_base::linked_chunk::Position> for Position {
 /// which can be stored in IndexedDB.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Gap {
-    /// The identifier of the chunk which is represented by this gap
+    /// The identifier of the chunk containing this gap.
     pub chunk_identifier: u64,
     /// The token to use in the query, extracted from a previous "from" /
     /// "end" field of a `/messages` response.

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
+pub mod traits;
 pub mod types;
 
 use gloo_utils::format::JsValueSerdeExt;
@@ -22,7 +23,10 @@ use wasm_bindgen::JsValue;
 use web_sys::IdbKeyRange;
 
 use crate::{
-    event_cache_store::serializer::types::{Indexed, IndexedKeyBounds, IndexedKeyRange},
+    event_cache_store::serializer::{
+        traits::{Indexed, IndexedKeyBounds},
+        types::IndexedKeyRange,
+    },
     serializer::{IndexeddbSerializer, IndexeddbSerializerError},
 };
 
@@ -40,6 +44,13 @@ impl<T> From<serde_wasm_bindgen::Error> for IndexeddbEventCacheStoreSerializerEr
     }
 }
 
+/// A (de)serializer for an IndexedDB implementation of [`EventCacheStore`][1].
+///
+/// This is primarily a wrapper around [`IndexeddbSerializer`] with a
+/// convenience functions for (de)serializing types specific to the
+/// [`EventCacheStore`][1].
+///
+/// [1]: matrix_sdk_base::event_cache::store::EventCacheStore
 #[derive(Debug)]
 pub struct IndexeddbEventCacheStoreSerializer {
     inner: IndexeddbSerializer,
@@ -68,6 +79,10 @@ impl IndexeddbEventCacheStoreSerializer {
             .map_err(IndexeddbEventCacheStoreSerializerError::Indexing)
     }
 
+    /// Encodes a key range for an [`Indexed`] type.
+    ///
+    /// Note that the particular key which is encoded is defined by the type
+    /// `K`.
     pub fn encode_key_range<'a, T, K>(
         &self,
         room_id: &RoomId,
@@ -97,6 +112,7 @@ impl IndexeddbEventCacheStoreSerializer {
         })
     }
 
+    /// Serializes an [`Indexed`] type into a [`JsValue`]
     pub fn serialize<T>(
         &self,
         room_id: &RoomId,

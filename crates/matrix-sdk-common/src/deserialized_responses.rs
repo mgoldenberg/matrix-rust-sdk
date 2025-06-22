@@ -17,7 +17,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 #[cfg(doc)]
 use ruma::events::AnyTimelineEvent;
 use ruma::{
-    events::{AnyMessageLikeEvent, AnySyncTimelineEvent},
+    events::{AnyMessageLikeEvent, AnySyncTimelineEvent, AnyToDeviceEvent},
     push::Action,
     serde::{
         AsRefStr, AsStrAsRefStr, DebugAsRefStr, DeserializeFromCowStr, FromString, JsonObject, Raw,
@@ -42,6 +42,8 @@ const VERIFICATION_VIOLATION: &str =
     "Encrypted by a previously-verified user who is no longer verified.";
 const UNSIGNED_DEVICE: &str = "Encrypted by a device not verified by its owner.";
 const UNKNOWN_DEVICE: &str = "Encrypted by an unknown or deleted device.";
+const MISMATCHED_SENDER: &str =
+    "The sender of the event does not match the owner of the device that created the Megolm session.";
 pub const SENT_IN_CLEAR: &str = "Not encrypted.";
 
 /// Represents the state of verification for a decrypted message sent by a
@@ -117,6 +119,10 @@ impl VerificationState {
                         message: AUTHENTICITY_NOT_GUARANTEED,
                     },
                 },
+                VerificationLevel::MismatchedSender => ShieldState::Red {
+                    code: ShieldStateCode::MismatchedSender,
+                    message: MISMATCHED_SENDER,
+                },
             },
         }
     }
@@ -171,6 +177,10 @@ impl VerificationState {
                         }
                     }
                 },
+                VerificationLevel::MismatchedSender => ShieldState::Red {
+                    code: ShieldStateCode::MismatchedSender,
+                    message: MISMATCHED_SENDER,
+                },
             },
         }
     }
@@ -198,6 +208,10 @@ pub enum VerificationLevel {
     /// deleted) or because the key to decrypt the message was obtained from
     /// an insecure source.
     None(DeviceLinkProblem),
+
+    /// The `sender` field on the event does not match the owner of the device
+    /// that established the Megolm session.
+    MismatchedSender,
 }
 
 impl fmt::Display for VerificationLevel {
@@ -211,6 +225,7 @@ impl fmt::Display for VerificationLevel {
                 "The sending device was not signed by the user's identity"
             }
             VerificationLevel::None(..) => "The sending device is not known",
+            VerificationLevel::MismatchedSender => MISMATCHED_SENDER,
         };
         write!(f, "{display}")
     }
@@ -271,6 +286,9 @@ pub enum ShieldStateCode {
     /// The sender was previously verified but changed their identity.
     #[serde(alias = "PreviouslyVerified")]
     VerificationViolation,
+    /// The `sender` field on the event does not match the owner of the device
+    /// that established the Megolm session.
+    MismatchedSender,
 }
 
 /// The algorithm specific information of a decrypted event.
@@ -387,7 +405,7 @@ pub struct ThreadSummary {
     /// This doesn't include the thread root event itself. It can be zero if no
     /// events in the thread are considered to be meaningful (or they've all
     /// been redacted).
-    pub num_replies: usize,
+    pub num_replies: u32,
 }
 
 /// The status of a thread summary.
@@ -1143,6 +1161,53 @@ impl From<SyncTimelineEventDeserializationHelperV0> for TimelineEvent {
             thread_summary: ThreadSummaryStatus::Unknown,
             // Bundled latest thread event is not persisted.
             bundled_latest_thread_event: None,
+        }
+    }
+}
+
+/// Represents a to-device event after it has been processed by the Olm machine.
+#[derive(Clone, Debug)]
+pub enum ProcessedToDeviceEvent {
+    /// A successfully-decrypted encrypted event.
+    /// Contains the raw decrypted event and encryption info
+    Decrypted {
+        /// The raw decrypted event
+        raw: Raw<AnyToDeviceEvent>,
+        /// The Olm encryption info
+        encryption_info: EncryptionInfo,
+    },
+
+    /// An encrypted event which could not be decrypted.
+    UnableToDecrypt(Raw<AnyToDeviceEvent>),
+
+    /// An unencrypted event.
+    PlainText(Raw<AnyToDeviceEvent>),
+
+    /// An invalid to device event that was ignored because it is missing some
+    /// required information to be processed (like no event `type` for
+    /// example)
+    Invalid(Raw<AnyToDeviceEvent>),
+}
+
+impl ProcessedToDeviceEvent {
+    /// Converts a ProcessedToDeviceEvent to the `Raw<AnyToDeviceEvent>` it
+    /// encapsulates
+    pub fn to_raw(&self) -> Raw<AnyToDeviceEvent> {
+        match self {
+            ProcessedToDeviceEvent::Decrypted { raw, .. } => raw.clone(),
+            ProcessedToDeviceEvent::UnableToDecrypt(event) => event.clone(),
+            ProcessedToDeviceEvent::PlainText(event) => event.clone(),
+            ProcessedToDeviceEvent::Invalid(event) => event.clone(),
+        }
+    }
+
+    /// Gets the raw to-device event.
+    pub fn as_raw(&self) -> &Raw<AnyToDeviceEvent> {
+        match self {
+            ProcessedToDeviceEvent::Decrypted { raw, .. } => raw,
+            ProcessedToDeviceEvent::UnableToDecrypt(event) => event,
+            ProcessedToDeviceEvent::PlainText(event) => event,
+            ProcessedToDeviceEvent::Invalid(event) => event,
         }
     }
 }
