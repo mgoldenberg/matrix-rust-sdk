@@ -81,29 +81,15 @@ const INDEXED_KEY_UPPER_CHARACTER: char = '\u{FFFF}';
 pub trait IndexedKeyBounds<T: Indexed>: IndexedKey<T> + Sized {
     fn lower_key_components() -> Self::KeyComponents;
 
-    fn encode_lower(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
+    fn lower_key(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
         <Self as IndexedKey<T>>::encode(room_id, &Self::lower_key_components(), serializer)
     }
 
     fn upper_key_components() -> Self::KeyComponents;
 
-    fn encode_upper(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
+    fn upper_key(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
         <Self as IndexedKey<T>>::encode(room_id, &Self::upper_key_components(), serializer)
     }
-}
-
-pub trait IndexedPartialKeyBounds<T: Indexed, PartialKeyComponents>: IndexedKey<T> {
-    fn encode_partial_lower(
-        room_id: &RoomId,
-        components: &PartialKeyComponents,
-        serializer: &IndexeddbSerializer,
-    ) -> Self;
-
-    fn encode_partial_upper(
-        room_id: &RoomId,
-        components: &PartialKeyComponents,
-        serializer: &IndexeddbSerializer,
-    ) -> Self;
 }
 
 /// A type that wraps a (de)serialized value `value` and associates it
@@ -480,30 +466,6 @@ impl IndexedKeyBounds<Event> for IndexedEventRelationKey {
 
     fn upper_key_components() -> Self::KeyComponents {
         (owned_event_id!("$\u{0000}"), RelationType::from(INDEXED_KEY_UPPER_CHARACTER.to_string()))
-    }
-}
-
-impl IndexedPartialKeyBounds<Event, OwnedEventId> for IndexedEventRelationKey {
-    fn encode_partial_lower(
-        room_id: &RoomId,
-        related_event_id: &OwnedEventId,
-        serializer: &IndexeddbSerializer,
-    ) -> Self {
-        let mut key = Self::encode_lower(room_id, serializer);
-        key.1 =
-            serializer.encode_key_as_string(keys::EVENTS_RELATION_RELATED_EVENTS, related_event_id);
-        key
-    }
-
-    fn encode_partial_upper(
-        room_id: &RoomId,
-        related_event_id: &OwnedEventId,
-        serializer: &IndexeddbSerializer,
-    ) -> Self {
-        let mut key = Self::encode_upper(room_id, serializer);
-        key.1 =
-            serializer.encode_key_as_string(keys::EVENTS_RELATION_RELATED_EVENTS, related_event_id);
-        key
     }
 }
 

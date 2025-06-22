@@ -22,9 +22,7 @@ use wasm_bindgen::JsValue;
 use web_sys::IdbKeyRange;
 
 use crate::{
-    event_cache_store::serializer::types::{
-        Indexed, IndexedKey, IndexedKeyBounds, IndexedPartialKeyBounds,
-    },
+    event_cache_store::serializer::types::{Indexed, IndexedKey, IndexedKeyBounds},
     serializer::{IndexeddbSerializer, IndexeddbSerializerError},
 };
 
@@ -106,7 +104,7 @@ impl IndexeddbEventCacheStoreSerializer {
         K::encode(room_id, components, &self.inner)
     }
 
-    pub fn encode_key_as_js_value<T, K>(
+    pub fn encode_key_as_value<T, K>(
         &self,
         room_id: &RoomId,
         components: &K::KeyComponents,
@@ -126,8 +124,8 @@ impl IndexeddbEventCacheStoreSerializer {
         T: Indexed,
         K: IndexedKeyBounds<T> + Serialize,
     {
-        let lower = serde_wasm_bindgen::to_value(&K::encode_lower(room_id, &self.inner))?;
-        let upper = serde_wasm_bindgen::to_value(&K::encode_upper(room_id, &self.inner))?;
+        let lower = serde_wasm_bindgen::to_value(&K::lower_key(room_id, &self.inner))?;
+        let upper = serde_wasm_bindgen::to_value(&K::upper_key(room_id, &self.inner))?;
         Ok(IdbKeyRange::bound(&lower, &upper).expect("construct key range"))
     }
 
@@ -143,28 +141,6 @@ impl IndexeddbEventCacheStoreSerializer {
     {
         let lower = serde_wasm_bindgen::to_value(&K::encode(room_id, lower, &self.inner))?;
         let upper = serde_wasm_bindgen::to_value(&K::encode(room_id, upper, &self.inner))?;
-        Ok(IdbKeyRange::bound(&lower, &upper)?)
-    }
-
-    pub fn encode_partial_key_range<T, K, C>(
-        &self,
-        room_id: &RoomId,
-        components: &C,
-    ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error>
-    where
-        T: Indexed,
-        K: IndexedPartialKeyBounds<T, C> + Serialize,
-    {
-        let lower = serde_wasm_bindgen::to_value(&K::encode_partial_lower(
-            room_id,
-            components,
-            &self.inner,
-        ))?;
-        let upper = serde_wasm_bindgen::to_value(&K::encode_partial_upper(
-            room_id,
-            components,
-            &self.inner,
-        ))?;
         Ok(IdbKeyRange::bound(&lower, &upper)?)
     }
 }

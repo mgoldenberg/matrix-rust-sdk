@@ -14,7 +14,7 @@ use crate::event_cache_store::{
         types::{
             Indexed, IndexedChunkIdKey, IndexedEventIdKey, IndexedEventPositionKey,
             IndexedEventRelationKey, IndexedGapIdKey, IndexedKey, IndexedKeyBounds,
-            IndexedNextChunkIdKey, IndexedPartialKeyBounds,
+            IndexedNextChunkIdKey,
         },
         IndexeddbEventCacheStoreSerializer,
     },
@@ -120,35 +120,6 @@ impl<'a> EventCacheStoreTransaction<'a> {
         K: IndexedKeyBounds<T> + Serialize,
     {
         let range = self.serializer.encode_key_range::<T, K>(room_id)?;
-        let object_store = self.transaction.object_store(T::OBJECT_STORE)?;
-        let array = if let Some(index) = K::index() {
-            object_store.index(index)?.get_all_with_key(&range)?.await?
-        } else {
-            object_store.get_all_with_key(&range)?.await?
-        };
-        let mut items = Vec::new();
-        for value in array {
-            let item = self
-                .serializer
-                .deserialize(value)
-                .map_err(|e| EventCacheStoreTransactionError::Serialization(Box::new(e)))?;
-            items.push(item);
-        }
-        Ok(items)
-    }
-
-    pub async fn get_items_by_partial_key<T, K, C>(
-        &self,
-        room_id: &RoomId,
-        components: &C,
-    ) -> Result<Vec<T>, EventCacheStoreTransactionError>
-    where
-        T: Indexed,
-        T::IndexedType: DeserializeOwned,
-        T::Error: WasmCompatibleAsyncError,
-        K: IndexedPartialKeyBounds<T, C> + Serialize,
-    {
-        let range = self.serializer.encode_partial_key_range::<T, K, C>(room_id, components)?;
         let object_store = self.transaction.object_store(T::OBJECT_STORE)?;
         let array = if let Some(index) = K::index() {
             object_store.index(index)?.get_all_with_key(&range)?.await?
@@ -651,9 +622,12 @@ impl<'a> EventCacheStoreTransaction<'a> {
         room_id: &RoomId,
         related_event_id: &OwnedEventId,
     ) -> Result<Vec<Event>, EventCacheStoreTransactionError> {
-        self.get_items_by_partial_key::<Event, IndexedEventRelationKey, _>(
+        let lower = IndexedEventRelationKey::lower_key_components();
+        let upper = IndexedEventRelationKey::upper_key_components();
+        self.get_items_by_key::<Event, IndexedEventRelationKey>(
             room_id,
-            related_event_id,
+            &(related_event_id.clone(), lower.1),
+            &(related_event_id.clone(), upper.1),
         )
         .await
     }
