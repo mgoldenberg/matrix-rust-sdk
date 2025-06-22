@@ -68,34 +68,6 @@ impl IndexeddbEventCacheStoreSerializer {
             .map_err(IndexeddbEventCacheStoreSerializerError::Indexing)
     }
 
-    pub fn serialize<T>(
-        &self,
-        room_id: &RoomId,
-        t: &T,
-    ) -> Result<JsValue, IndexeddbEventCacheStoreSerializerError<T::Error>>
-    where
-        T: Indexed,
-        T::IndexedType: Serialize,
-    {
-        let indexed = t
-            .to_indexed(room_id, &self.inner)
-            .map_err(IndexeddbEventCacheStoreSerializerError::Indexing)?;
-        serde_wasm_bindgen::to_value(&indexed).map_err(Into::into)
-    }
-
-    pub fn deserialize<T>(
-        &self,
-        value: JsValue,
-    ) -> Result<T, IndexeddbEventCacheStoreSerializerError<T::Error>>
-    where
-        T: Indexed,
-        T::IndexedType: DeserializeOwned,
-    {
-        let indexed: T::IndexedType = value.into_serde()?;
-        T::from_indexed(indexed, &self.inner)
-            .map_err(IndexeddbEventCacheStoreSerializerError::Indexing)
-    }
-
     pub fn encode_key_range<'a, T, K>(
         &self,
         room_id: &RoomId,
@@ -123,5 +95,33 @@ impl IndexeddbEventCacheStoreSerializer {
                 IdbKeyRange::bound(&lower, &upper).expect("construct key range")
             }
         })
+    }
+
+    pub fn serialize<T>(
+        &self,
+        room_id: &RoomId,
+        t: &T,
+    ) -> Result<JsValue, IndexeddbEventCacheStoreSerializerError<T::Error>>
+    where
+        T: Indexed,
+        T::IndexedType: Serialize,
+    {
+        let indexed = t
+            .to_indexed(room_id, &self.inner)
+            .map_err(IndexeddbEventCacheStoreSerializerError::Indexing)?;
+        serde_wasm_bindgen::to_value(&indexed).map_err(Into::into)
+    }
+
+    pub fn deserialize<T>(
+        &self,
+        value: JsValue,
+    ) -> Result<T, IndexeddbEventCacheStoreSerializerError<T::Error>>
+    where
+        T: Indexed,
+        T::IndexedType: DeserializeOwned,
+    {
+        let indexed: T::IndexedType = value.into_serde()?;
+        T::from_indexed(indexed, &self.inner)
+            .map_err(IndexeddbEventCacheStoreSerializerError::Indexing)
     }
 }
