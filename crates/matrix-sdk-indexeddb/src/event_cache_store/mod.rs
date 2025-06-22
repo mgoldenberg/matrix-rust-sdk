@@ -13,6 +13,7 @@
 // limitations under the License
 
 mod builder;
+mod error;
 mod migrations;
 mod serializer;
 mod transaction;
@@ -50,7 +51,9 @@ use crate::{
             types::IndexedEventError, IndexeddbEventCacheStoreSerializer,
             IndexeddbEventCacheStoreSerializerError,
         },
-        transaction::{EventCacheStoreTransaction, EventCacheStoreTransactionError},
+        transaction::{
+            IndexeddbEventCacheStoreTransaction, IndexeddbEventCacheStoreTransactionError,
+        },
         types::{ChunkType, InBandEvent, OutOfBandEvent},
     },
     serializer::IndexeddbSerializerError,
@@ -87,7 +90,7 @@ pub enum IndexeddbEventCacheStoreError {
     #[error("media store: {0}")]
     MediaStore(#[from] EventCacheStoreError),
     #[error("transaction: {0}")]
-    Transaction(EventCacheStoreTransactionError),
+    Transaction(IndexeddbEventCacheStoreTransactionError),
 }
 
 impl From<web_sys::DomException> for IndexeddbEventCacheStoreError {
@@ -142,10 +145,10 @@ impl From<IndexeddbEventCacheStoreSerializerError<IndexeddbSerializerError>>
     }
 }
 
-impl From<EventCacheStoreTransactionError> for IndexeddbEventCacheStoreError {
-    fn from(value: EventCacheStoreTransactionError) -> Self {
+impl From<IndexeddbEventCacheStoreTransactionError> for IndexeddbEventCacheStoreError {
+    fn from(value: IndexeddbEventCacheStoreTransactionError) -> Self {
         match value {
-            EventCacheStoreTransactionError::DomException { code, name, message } => {
+            IndexeddbEventCacheStoreTransactionError::DomException { code, name, message } => {
                 Self::DomException { name, message, code }
             }
             e => Self::Transaction(e),
@@ -175,8 +178,8 @@ impl IndexeddbEventCacheStore {
         &'a self,
         stores: &[&str],
         mode: IdbTransactionMode,
-    ) -> Result<EventCacheStoreTransaction<'a>, IndexeddbEventCacheStoreError> {
-        Ok(EventCacheStoreTransaction::new(
+    ) -> Result<IndexeddbEventCacheStoreTransaction<'a>, IndexeddbEventCacheStoreError> {
+        Ok(IndexeddbEventCacheStoreTransaction::new(
             self.inner.transaction_on_multi_with_mode(stores, mode)?,
             &self.serializer,
         ))
@@ -375,7 +378,7 @@ impl_event_cache_store! {
                 }
             }
         }
-        transaction.execute().await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -426,7 +429,7 @@ impl_event_cache_store! {
             return Ok((None, ChunkIdentifierGenerator::new_from_scratch()));
         }
         match transaction.get_chunk_by_next_chunk_id(room_id, &None).await {
-            Err(EventCacheStoreTransactionError::ItemIsNotUnique) => {
+            Err(IndexeddbEventCacheStoreTransactionError::ItemIsNotUnique) => {
                 Err(IndexeddbEventCacheStoreError::ChunksContainDisjointLists)
             }
             Err(e) => Err(e.into()),
@@ -491,7 +494,7 @@ impl_event_cache_store! {
         transaction.clear::<types::Chunk>().await?;
         transaction.clear::<types::Event>().await?;
         transaction.clear::<types::Gap>().await?;
-        transaction.execute().await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -594,7 +597,7 @@ impl_event_cache_store! {
             None => types::Event::OutOfBand(OutOfBandEvent { content: event, position: () }),
         };
         transaction.put_item(room_id, &event).await?;
-        transaction.execute().await?;
+        transaction.commit().await?;
         Ok(())
     }
 

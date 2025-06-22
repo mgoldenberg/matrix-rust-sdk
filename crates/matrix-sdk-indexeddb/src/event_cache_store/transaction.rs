@@ -2,7 +2,6 @@ use indexed_db_futures::{prelude::IdbTransaction, IdbQuerySource};
 use matrix_sdk_base::{
     event_cache::{Event as RawEvent, Gap as RawGap},
     linked_chunk::{ChunkContent, ChunkIdentifier, RawChunk},
-    SendOutsideWasm, SyncOutsideWasm,
 };
 use ruma::{events::relation::RelationType, OwnedEventId, RoomId};
 use serde::{de::DeserializeOwned, Serialize};
@@ -10,6 +9,7 @@ use thiserror::Error;
 use web_sys::IdbCursorDirection;
 
 use crate::event_cache_store::{
+    error::AsyncErrorDeps,
     serializer::{
         types::{
             Indexed, IndexedChunkIdKey, IndexedEventIdKey, IndexedEventPositionKey,
@@ -21,35 +21,25 @@ use crate::event_cache_store::{
     types::{Chunk, ChunkType, Event, Gap, Position},
 };
 
-pub trait WasmCompatibleAsyncError:
-    std::error::Error + SendOutsideWasm + SyncOutsideWasm + 'static
-{
-}
-
-impl<T> WasmCompatibleAsyncError for T where
-    T: std::error::Error + SendOutsideWasm + SyncOutsideWasm + 'static
-{
-}
-
 #[derive(Debug, Error)]
-pub enum EventCacheStoreTransactionError {
+pub enum IndexeddbEventCacheStoreTransactionError {
     #[error("DomException {name} ({code}): {message}")]
     DomException { name: String, message: String, code: u16 },
     #[error("serialization: {0}")]
-    Serialization(Box<dyn WasmCompatibleAsyncError>),
+    Serialization(Box<dyn AsyncErrorDeps>),
     #[error("item is not unique")]
     ItemIsNotUnique,
     #[error("item not found")]
     ItemNotFound,
 }
 
-impl From<web_sys::DomException> for EventCacheStoreTransactionError {
+impl From<web_sys::DomException> for IndexeddbEventCacheStoreTransactionError {
     fn from(value: web_sys::DomException) -> Self {
         Self::DomException { name: value.name(), message: value.message(), code: value.code() }
     }
 }
 
-impl From<serde_wasm_bindgen::Error> for EventCacheStoreTransactionError {
+impl From<serde_wasm_bindgen::Error> for IndexeddbEventCacheStoreTransactionError {
     fn from(e: serde_wasm_bindgen::Error) -> Self {
         Self::Serialization(Box::new(<serde_json::Error as serde::de::Error>::custom(
             e.to_string(),
@@ -58,12 +48,12 @@ impl From<serde_wasm_bindgen::Error> for EventCacheStoreTransactionError {
 }
 
 #[derive(Debug)]
-pub struct EventCacheStoreTransaction<'a> {
+pub struct IndexeddbEventCacheStoreTransaction<'a> {
     transaction: IdbTransaction<'a>,
     serializer: &'a IndexeddbEventCacheStoreSerializer,
 }
 
-impl<'a> EventCacheStoreTransaction<'a> {
+impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     pub fn new(
         transaction: IdbTransaction<'a>,
         serializer: &'a IndexeddbEventCacheStoreSerializer,
@@ -75,7 +65,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         self.transaction
     }
 
-    pub async fn execute(self) -> Result<(), EventCacheStoreTransactionError> {
+    pub async fn commit(self) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         self.transaction.await.into_result().map_err(Into::into)
     }
 
@@ -84,11 +74,11 @@ impl<'a> EventCacheStoreTransaction<'a> {
         room_id: &RoomId,
         lower: &K::KeyComponents,
         upper: &K::KeyComponents,
-    ) -> Result<Vec<T>, EventCacheStoreTransactionError>
+    ) -> Result<Vec<T>, IndexeddbEventCacheStoreTransactionError>
     where
         T: Indexed,
         T::IndexedType: DeserializeOwned,
-        T::Error: WasmCompatibleAsyncError,
+        T::Error: AsyncErrorDeps,
         K: IndexedKey<T> + IndexedKeyBounds<T> + Serialize,
     {
         let range = self.serializer.encode_key_range_from_to::<T, K>(room_id, lower, upper)?;
@@ -100,10 +90,9 @@ impl<'a> EventCacheStoreTransaction<'a> {
         };
         let mut items = Vec::new();
         for value in array {
-            let item = self
-                .serializer
-                .deserialize(value)
-                .map_err(|e| EventCacheStoreTransactionError::Serialization(Box::new(e)))?;
+            let item = self.serializer.deserialize(value).map_err(|e| {
+                IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e))
+            })?;
             items.push(item);
         }
         Ok(items)
@@ -112,11 +101,11 @@ impl<'a> EventCacheStoreTransaction<'a> {
     pub async fn get_items_in_room<T, K>(
         &self,
         room_id: &RoomId,
-    ) -> Result<Vec<T>, EventCacheStoreTransactionError>
+    ) -> Result<Vec<T>, IndexeddbEventCacheStoreTransactionError>
     where
         T: Indexed,
         T::IndexedType: DeserializeOwned,
-        T::Error: WasmCompatibleAsyncError,
+        T::Error: AsyncErrorDeps,
         K: IndexedKeyBounds<T> + Serialize,
     {
         let range = self.serializer.encode_key_range::<T, K>(room_id)?;
@@ -128,10 +117,9 @@ impl<'a> EventCacheStoreTransaction<'a> {
         };
         let mut items = Vec::new();
         for value in array {
-            let item = self
-                .serializer
-                .deserialize(value)
-                .map_err(|e| EventCacheStoreTransactionError::Serialization(Box::new(e)))?;
+            let item = self.serializer.deserialize(value).map_err(|e| {
+                IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e))
+            })?;
             items.push(item);
         }
         Ok(items)
@@ -141,16 +129,16 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         components: &K::KeyComponents,
-    ) -> Result<Option<T>, EventCacheStoreTransactionError>
+    ) -> Result<Option<T>, IndexeddbEventCacheStoreTransactionError>
     where
         T: Indexed,
         T::IndexedType: DeserializeOwned,
-        T::Error: WasmCompatibleAsyncError,
+        T::Error: AsyncErrorDeps,
         K: IndexedKey<T> + IndexedKeyBounds<T> + Serialize,
     {
         let mut items = self.get_items_by_key::<T, K>(room_id, components, components).await?;
         if items.len() > 1 {
-            return Err(EventCacheStoreTransactionError::ItemIsNotUnique);
+            return Err(IndexeddbEventCacheStoreTransactionError::ItemIsNotUnique);
         }
         Ok(items.pop())
     }
@@ -160,11 +148,11 @@ impl<'a> EventCacheStoreTransaction<'a> {
         room_id: &RoomId,
         lower: &K::KeyComponents,
         upper: &K::KeyComponents,
-    ) -> Result<usize, EventCacheStoreTransactionError>
+    ) -> Result<usize, IndexeddbEventCacheStoreTransactionError>
     where
         T: Indexed,
         T::IndexedType: DeserializeOwned,
-        T::Error: WasmCompatibleAsyncError,
+        T::Error: AsyncErrorDeps,
         K: IndexedKeyBounds<T> + Serialize,
     {
         let range = self.serializer.encode_key_range_from_to::<T, K>(room_id, lower, upper)?;
@@ -180,11 +168,11 @@ impl<'a> EventCacheStoreTransaction<'a> {
     pub async fn get_items_count_in_room<T, K>(
         &self,
         room_id: &RoomId,
-    ) -> Result<usize, EventCacheStoreTransactionError>
+    ) -> Result<usize, IndexeddbEventCacheStoreTransactionError>
     where
         T: Indexed,
         T::IndexedType: DeserializeOwned,
-        T::Error: WasmCompatibleAsyncError,
+        T::Error: AsyncErrorDeps,
         K: IndexedKeyBounds<T> + Serialize,
     {
         self.get_items_count_by_key::<T, K>(
@@ -198,11 +186,11 @@ impl<'a> EventCacheStoreTransaction<'a> {
     pub async fn get_max_item_by_key<T, K>(
         &self,
         room_id: &RoomId,
-    ) -> Result<Option<T>, EventCacheStoreTransactionError>
+    ) -> Result<Option<T>, IndexeddbEventCacheStoreTransactionError>
     where
         T: Indexed,
         T::IndexedType: DeserializeOwned,
-        T::Error: WasmCompatibleAsyncError,
+        T::Error: AsyncErrorDeps,
         K: IndexedKey<T> + IndexedKeyBounds<T> + Serialize,
     {
         let range = self.serializer.encode_key_range::<T, K>(room_id)?;
@@ -215,14 +203,14 @@ impl<'a> EventCacheStoreTransaction<'a> {
                 .await?
                 .map(|cursor| self.serializer.deserialize(cursor.value()))
                 .transpose()
-                .map_err(|e| EventCacheStoreTransactionError::Serialization(Box::new(e)))
+                .map_err(|e| IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e)))
         } else {
             object_store
                 .open_cursor_with_range_and_direction(&range, direction)?
                 .await?
                 .map(|cursor| self.serializer.deserialize(cursor.value()))
                 .transpose()
-                .map_err(|e| EventCacheStoreTransactionError::Serialization(Box::new(e)))
+                .map_err(|e| IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e)))
         }
     }
 
@@ -230,19 +218,17 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         item: &T,
-    ) -> Result<(), EventCacheStoreTransactionError>
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError>
     where
         T: Indexed + Serialize,
         T::IndexedType: Serialize,
-        T::Error: WasmCompatibleAsyncError,
+        T::Error: AsyncErrorDeps,
     {
         self.transaction
             .object_store(T::OBJECT_STORE)?
-            .add_val_owned(
-                self.serializer
-                    .serialize(room_id, item)
-                    .map_err(|e| EventCacheStoreTransactionError::Serialization(Box::new(e)))?,
-            )?
+            .add_val_owned(self.serializer.serialize(room_id, item).map_err(|e| {
+                IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e))
+            })?)?
             .await
             .map_err(Into::into)
     }
@@ -251,19 +237,17 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         item: &T,
-    ) -> Result<(), EventCacheStoreTransactionError>
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError>
     where
         T: Indexed + Serialize,
         T::IndexedType: Serialize,
-        T::Error: WasmCompatibleAsyncError,
+        T::Error: AsyncErrorDeps,
     {
         self.transaction
             .object_store(T::OBJECT_STORE)?
-            .put_val_owned(
-                self.serializer
-                    .serialize(room_id, item)
-                    .map_err(|e| EventCacheStoreTransactionError::Serialization(Box::new(e)))?,
-            )?
+            .put_val_owned(self.serializer.serialize(room_id, item).map_err(|e| {
+                IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e))
+            })?)?
             .await
             .map_err(Into::into)
     }
@@ -273,7 +257,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         room_id: &RoomId,
         lower: &K::KeyComponents,
         upper: &K::KeyComponents,
-    ) -> Result<(), EventCacheStoreTransactionError>
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError>
     where
         T: Indexed,
         K: IndexedKeyBounds<T> + Serialize,
@@ -297,7 +281,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
     pub async fn delete_items_in_room<T, K>(
         &self,
         room_id: &RoomId,
-    ) -> Result<(), EventCacheStoreTransactionError>
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError>
     where
         T: Indexed,
         K: IndexedKeyBounds<T> + Serialize,
@@ -322,7 +306,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         key: &K::KeyComponents,
-    ) -> Result<(), EventCacheStoreTransactionError>
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError>
     where
         T: Indexed,
         K: IndexedKeyBounds<T> + Serialize,
@@ -335,7 +319,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         room_id: &RoomId,
         lower: &ChunkIdentifier,
         upper: &ChunkIdentifier,
-    ) -> Result<Vec<Chunk>, EventCacheStoreTransactionError> {
+    ) -> Result<Vec<Chunk>, IndexeddbEventCacheStoreTransactionError> {
         self.get_items_by_key::<Chunk, IndexedChunkIdKey>(room_id, lower, upper).await
     }
 
@@ -344,28 +328,28 @@ impl<'a> EventCacheStoreTransaction<'a> {
         room_id: &RoomId,
         lower: &ChunkIdentifier,
         upper: &ChunkIdentifier,
-    ) -> Result<(), EventCacheStoreTransactionError> {
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         self.delete_items_by_key::<Chunk, IndexedChunkIdKey>(room_id, lower, upper).await
     }
 
     pub async fn get_chunks_in_room(
         &self,
         room_id: &RoomId,
-    ) -> Result<Vec<Chunk>, EventCacheStoreTransactionError> {
+    ) -> Result<Vec<Chunk>, IndexeddbEventCacheStoreTransactionError> {
         self.get_items_in_room::<Chunk, IndexedChunkIdKey>(room_id).await
     }
 
     pub async fn get_chunks_count_in_room(
         &self,
         room_id: &RoomId,
-    ) -> Result<usize, EventCacheStoreTransactionError> {
+    ) -> Result<usize, IndexeddbEventCacheStoreTransactionError> {
         self.get_items_count_in_room::<Chunk, IndexedChunkIdKey>(room_id).await
     }
 
     pub async fn delete_chunks_in_room(
         &self,
         room_id: &RoomId,
-    ) -> Result<(), EventCacheStoreTransactionError> {
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         self.delete_items_in_room::<Chunk, IndexedChunkIdKey>(room_id).await
     }
 
@@ -373,14 +357,14 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         chunk_id: &ChunkIdentifier,
-    ) -> Result<Option<Chunk>, EventCacheStoreTransactionError> {
+    ) -> Result<Option<Chunk>, IndexeddbEventCacheStoreTransactionError> {
         self.get_item_by_key::<Chunk, IndexedChunkIdKey>(room_id, chunk_id).await
     }
 
     pub async fn get_max_chunk_by_id(
         &self,
         room_id: &RoomId,
-    ) -> Result<Option<Chunk>, EventCacheStoreTransactionError> {
+    ) -> Result<Option<Chunk>, IndexeddbEventCacheStoreTransactionError> {
         self.get_max_item_by_key::<Chunk, IndexedChunkIdKey>(room_id).await
     }
 
@@ -388,7 +372,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         chunk_id: &ChunkIdentifier,
-    ) -> Result<Option<RawChunk<RawEvent, RawGap>>, EventCacheStoreTransactionError> {
+    ) -> Result<Option<RawChunk<RawEvent, RawGap>>, IndexeddbEventCacheStoreTransactionError> {
         if let Some(chunk) = self.get_chunk_by_id(room_id, chunk_id).await? {
             let content = match chunk.chunk_type {
                 ChunkType::Event => {
@@ -404,7 +388,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
                     let gap = self
                         .get_gap_by_id(room_id, &ChunkIdentifier::new(chunk.identifier))
                         .await?
-                        .ok_or(EventCacheStoreTransactionError::ItemNotFound)?;
+                        .ok_or(IndexeddbEventCacheStoreTransactionError::ItemNotFound)?;
                     ChunkContent::Gap(RawGap { prev_token: gap.prev_token })
                 }
             };
@@ -422,7 +406,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         chunk: &Chunk,
-    ) -> Result<(), EventCacheStoreTransactionError> {
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         self.add_item(room_id, chunk).await?;
         if let Some(previous) = chunk.previous {
             let previous_identifier = ChunkIdentifier::new(previous);
@@ -447,7 +431,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         chunk_id: &ChunkIdentifier,
-    ) -> Result<(), EventCacheStoreTransactionError> {
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         if let Some(chunk) = self.get_chunk_by_id(room_id, chunk_id).await? {
             if let Some(previous) = chunk.previous {
                 let previous_identifier = ChunkIdentifier::new(previous);
@@ -477,7 +461,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         room_id: &RoomId,
         lower: &Option<ChunkIdentifier>,
         upper: &Option<ChunkIdentifier>,
-    ) -> Result<Vec<Chunk>, EventCacheStoreTransactionError> {
+    ) -> Result<Vec<Chunk>, IndexeddbEventCacheStoreTransactionError> {
         self.get_items_by_key::<Chunk, IndexedNextChunkIdKey>(room_id, lower, upper).await
     }
 
@@ -485,7 +469,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         next_chunk_id: &Option<ChunkIdentifier>,
-    ) -> Result<Option<Chunk>, EventCacheStoreTransactionError> {
+    ) -> Result<Option<Chunk>, IndexeddbEventCacheStoreTransactionError> {
         self.get_item_by_key::<Chunk, IndexedNextChunkIdKey>(room_id, next_chunk_id).await
     }
 
@@ -494,7 +478,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         room_id: &RoomId,
         lower: &OwnedEventId,
         upper: &OwnedEventId,
-    ) -> Result<Vec<Event>, EventCacheStoreTransactionError> {
+    ) -> Result<Vec<Event>, IndexeddbEventCacheStoreTransactionError> {
         self.get_items_by_key::<Event, IndexedEventIdKey>(room_id, lower, upper).await
     }
 
@@ -502,7 +486,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         event_id: &OwnedEventId,
-    ) -> Result<Option<Event>, EventCacheStoreTransactionError> {
+    ) -> Result<Option<Event>, IndexeddbEventCacheStoreTransactionError> {
         self.get_item_by_key::<Event, IndexedEventIdKey>(room_id, event_id).await
     }
 
@@ -511,7 +495,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         room_id: &RoomId,
         lower: &Position,
         upper: &Position,
-    ) -> Result<Vec<Event>, EventCacheStoreTransactionError> {
+    ) -> Result<Vec<Event>, IndexeddbEventCacheStoreTransactionError> {
         self.get_items_by_key::<Event, IndexedEventPositionKey>(room_id, lower, upper).await
     }
 
@@ -520,7 +504,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         room_id: &RoomId,
         lower: &Position,
         upper: &Position,
-    ) -> Result<(), EventCacheStoreTransactionError> {
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         self.delete_items_by_key::<Event, IndexedEventPositionKey>(room_id, lower, upper).await
     }
 
@@ -528,7 +512,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         position: &Position,
-    ) -> Result<Option<Event>, EventCacheStoreTransactionError> {
+    ) -> Result<Option<Event>, IndexeddbEventCacheStoreTransactionError> {
         self.get_item_by_key::<Event, IndexedEventPositionKey>(room_id, position).await
     }
 
@@ -536,7 +520,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         position: &Position,
-    ) -> Result<(), EventCacheStoreTransactionError> {
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         self.delete_item_by_key::<Event, IndexedEventPositionKey>(room_id, position).await
     }
 
@@ -544,7 +528,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         event_id: &OwnedEventId,
-    ) -> Result<(), EventCacheStoreTransactionError> {
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         self.delete_item_by_key::<Event, IndexedEventIdKey>(room_id, event_id).await
     }
 
@@ -552,7 +536,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         chunk_id: &ChunkIdentifier,
-    ) -> Result<Vec<Event>, EventCacheStoreTransactionError> {
+    ) -> Result<Vec<Event>, IndexeddbEventCacheStoreTransactionError> {
         self.get_events_by_position(
             room_id,
             &Position { chunk_identifier: chunk_id.index(), index: 0 },
@@ -565,7 +549,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         chunk_id: &ChunkIdentifier,
-    ) -> Result<(), EventCacheStoreTransactionError> {
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         self.delete_events_by_position(
             room_id,
             &Position { chunk_identifier: chunk_id.index(), index: 0 },
@@ -578,7 +562,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         position: &Position,
-    ) -> Result<Vec<Event>, EventCacheStoreTransactionError> {
+    ) -> Result<Vec<Event>, IndexeddbEventCacheStoreTransactionError> {
         self.get_events_by_position(
             room_id,
             position,
@@ -591,7 +575,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         position: &Position,
-    ) -> Result<(), EventCacheStoreTransactionError> {
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         self.delete_events_by_position(
             room_id,
             position,
@@ -605,7 +589,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         room_id: &RoomId,
         lower: &(OwnedEventId, RelationType),
         upper: &(OwnedEventId, RelationType),
-    ) -> Result<Vec<Event>, EventCacheStoreTransactionError> {
+    ) -> Result<Vec<Event>, IndexeddbEventCacheStoreTransactionError> {
         self.get_items_by_key::<Event, IndexedEventRelationKey>(room_id, lower, upper).await
     }
 
@@ -613,7 +597,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         position: &(OwnedEventId, RelationType),
-    ) -> Result<Option<Event>, EventCacheStoreTransactionError> {
+    ) -> Result<Option<Event>, IndexeddbEventCacheStoreTransactionError> {
         self.get_item_by_key::<Event, IndexedEventRelationKey>(room_id, position).await
     }
 
@@ -621,7 +605,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         related_event_id: &OwnedEventId,
-    ) -> Result<Vec<Event>, EventCacheStoreTransactionError> {
+    ) -> Result<Vec<Event>, IndexeddbEventCacheStoreTransactionError> {
         let lower = IndexedEventRelationKey::lower_key_components();
         let upper = IndexedEventRelationKey::upper_key_components();
         self.get_items_by_key::<Event, IndexedEventRelationKey>(
@@ -635,7 +619,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
     pub async fn delete_events_in_room(
         &self,
         room_id: &RoomId,
-    ) -> Result<(), EventCacheStoreTransactionError> {
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         self.delete_items_in_room::<Event, IndexedEventIdKey>(room_id).await
     }
 
@@ -643,7 +627,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         event: &Event,
-    ) -> Result<(), EventCacheStoreTransactionError> {
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         if let Some(position) = event.position() {
             // For some reason, we can't simply replace an event with `put_item`
             // because we get an error stating that the data violates a uniqueness
@@ -663,7 +647,7 @@ impl<'a> EventCacheStoreTransaction<'a> {
         room_id: &RoomId,
         lower: &ChunkIdentifier,
         upper: &ChunkIdentifier,
-    ) -> Result<Vec<Gap>, EventCacheStoreTransactionError> {
+    ) -> Result<Vec<Gap>, IndexeddbEventCacheStoreTransactionError> {
         self.get_items_by_key::<Gap, IndexedGapIdKey>(room_id, lower, upper).await
     }
 
@@ -671,18 +655,18 @@ impl<'a> EventCacheStoreTransaction<'a> {
         &self,
         room_id: &RoomId,
         chunk_id: &ChunkIdentifier,
-    ) -> Result<Option<Gap>, EventCacheStoreTransactionError> {
+    ) -> Result<Option<Gap>, IndexeddbEventCacheStoreTransactionError> {
         self.get_item_by_key::<Gap, IndexedGapIdKey>(room_id, chunk_id).await
     }
 
     pub async fn delete_gaps_in_room(
         &self,
         room_id: &RoomId,
-    ) -> Result<(), EventCacheStoreTransactionError> {
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         self.delete_items_in_room::<Gap, IndexedGapIdKey>(room_id).await
     }
 
-    pub async fn clear<T>(&self) -> Result<(), EventCacheStoreTransactionError>
+    pub async fn clear<T>(&self) -> Result<(), IndexeddbEventCacheStoreTransactionError>
     where
         T: Indexed,
     {
