@@ -452,6 +452,14 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
                 }
             }
             self.delete_item_by_key::<Chunk, IndexedChunkIdKey>(room_id, chunk_id).await?;
+            match chunk.chunk_type {
+                ChunkType::Event => {
+                    self.delete_events_by_chunk(room_id, chunk_id).await?;
+                }
+                ChunkType::Gap => {
+                    self.delete_gap_by_id(room_id, chunk_id).await?;
+                }
+            }
         }
         Ok(())
     }
@@ -657,6 +665,14 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
         chunk_id: &ChunkIdentifier,
     ) -> Result<Option<Gap>, IndexeddbEventCacheStoreTransactionError> {
         self.get_item_by_key::<Gap, IndexedGapIdKey>(room_id, chunk_id).await
+    }
+
+    pub async fn delete_gap_by_id(
+        &self,
+        room_id: &RoomId,
+        chunk_id: &ChunkIdentifier,
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
+        self.delete_item_by_key::<Gap, IndexedGapIdKey>(room_id, chunk_id).await
     }
 
     pub async fn delete_gaps_in_room(
