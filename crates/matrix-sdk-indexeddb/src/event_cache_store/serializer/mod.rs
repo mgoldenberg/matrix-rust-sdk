@@ -24,7 +24,7 @@ use web_sys::IdbKeyRange;
 
 use crate::{
     event_cache_store::serializer::{
-        traits::{Indexed, IndexedKeyBounds},
+        traits::{Indexed, IndexedKey, IndexedKeyBounds, IndexedKeyComponentBounds},
         types::IndexedKeyRange,
     },
     serializer::{IndexeddbSerializer, IndexeddbSerializerError},
@@ -61,6 +61,10 @@ impl IndexeddbEventCacheStoreSerializer {
         Self { inner }
     }
 
+    pub fn inner(&self) -> &IndexeddbSerializer {
+        &self.inner
+    }
+
     pub fn serialize_value(
         &self,
         value: &impl Serialize,
@@ -79,30 +83,68 @@ impl IndexeddbEventCacheStoreSerializer {
             .map_err(IndexeddbEventCacheStoreSerializerError::Indexing)
     }
 
-    /// Encodes a key range for an [`Indexed`] type.
+    /// Encodes an key for a [`Indexed`] type.
     ///
     /// Note that the particular key which is encoded is defined by the type
     /// `K`.
-    pub fn encode_key_range<'a, T, K>(
+    pub fn encode_key<T, K>(&self, room_id: &RoomId, components: &K::KeyComponents) -> K
+    where
+        T: Indexed,
+        K: IndexedKey<T>,
+    {
+        K::encode(room_id, components, &self.inner)
+    }
+
+    /// Encodes a key component range for an [`Indexed`] type.
+    ///
+    /// Note that the particular key which is encoded is defined by the type
+    /// `K`.
+    pub fn encode_key_component_range<'a, T, K>(
         &self,
         room_id: &RoomId,
         range: impl Into<IndexedKeyRange<&'a K::KeyComponents>>,
     ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error>
     where
         T: Indexed,
-        K: IndexedKeyBounds<T> + Serialize,
+        K: IndexedKeyComponentBounds<T> + Serialize,
         K::KeyComponents: 'a,
+    {
+        let range = match range.into() {
+            IndexedKeyRange::Only(components) => {
+                IndexedKeyRange::Only(K::encode(room_id, components, &self.inner))
+            }
+            IndexedKeyRange::Bound(lower, upper) => {
+                let lower = K::encode(room_id, lower, &self.inner);
+                let upper = K::encode(room_id, upper, &self.inner);
+                IndexedKeyRange::Bound(lower, upper)
+            }
+            IndexedKeyRange::All => {
+                let lower = K::lower_key(room_id, &self.inner);
+                let upper = K::upper_key(room_id, &self.inner);
+                IndexedKeyRange::Bound(lower, upper)
+            }
+        };
+        self.encode_key_range::<T, K>(room_id, range)
+    }
+
+    /// Encodes a key component range for an [`Indexed`] type.
+    ///
+    /// Note that the particular key which is encoded is defined by the type
+    /// `K`.
+    pub fn encode_key_range<T, K>(
+        &self,
+        room_id: &RoomId,
+        range: impl Into<IndexedKeyRange<K>>,
+    ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error>
+    where
+        T: Indexed,
+        K: IndexedKeyBounds<T> + Serialize,
     {
         use serde_wasm_bindgen::to_value;
         Ok(match range.into() {
-            IndexedKeyRange::Only(key) => {
-                let key = to_value(&K::encode(room_id, key, &self.inner))?;
-                IdbKeyRange::only(&key)?
-            }
+            IndexedKeyRange::Only(key) => IdbKeyRange::only(&to_value(&key)?)?,
             IndexedKeyRange::Bound(lower, upper) => {
-                let lower = to_value(&K::encode(room_id, lower, &self.inner))?;
-                let upper = to_value(&K::encode(room_id, upper, &self.inner))?;
-                IdbKeyRange::bound(&lower, &upper)?
+                IdbKeyRange::bound(&to_value(&lower)?, &to_value(&upper)?)?
             }
             IndexedKeyRange::All => {
                 let lower = to_value(&K::lower_key(room_id, &self.inner))?;
