@@ -50,9 +50,6 @@ pub trait Indexed: Sized {
 ///
 /// Each implementation represents a key on an [`Indexed`] type.
 pub trait IndexedKey<T: Indexed> {
-    /// The path to the key in the in the object.
-    const PATH: &'static str;
-
     /// Any extra data used to construct the key.
     type KeyComponents;
 

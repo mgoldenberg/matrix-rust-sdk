@@ -150,8 +150,6 @@ impl Indexed for Chunk {
 pub struct IndexedChunkIdKey(IndexedRoomId, IndexedChunkId);
 
 impl IndexedKey<Chunk> for IndexedChunkIdKey {
-    const PATH: &'static str = keys::LINKED_CHUNKS_KEY_PATH;
-
     type KeyComponents = ChunkIdentifier;
 
     fn encode(
@@ -210,8 +208,6 @@ impl IndexedNextChunkIdKey {
 }
 
 impl IndexedKey<Chunk> for IndexedNextChunkIdKey {
-    const PATH: &'static str = keys::LINKED_CHUNKS_NEXT_KEY_PATH;
-
     type KeyComponents = Option<ChunkIdentifier>;
 
     fn index() -> Option<&'static str> {
@@ -315,8 +311,6 @@ impl Indexed for Event {
 pub struct IndexedEventIdKey(IndexedRoomId, IndexedEventId);
 
 impl IndexedKey<Event> for IndexedEventIdKey {
-    const PATH: &'static str = keys::EVENTS_KEY_PATH;
-
     type KeyComponents = OwnedEventId;
 
     fn encode(room_id: &RoomId, event_id: &OwnedEventId, serializer: &IndexeddbSerializer) -> Self {
@@ -356,8 +350,6 @@ pub type IndexedEventId = String;
 pub struct IndexedEventPositionKey(IndexedRoomId, IndexedChunkId, IndexedEventPositionIndex);
 
 impl IndexedKey<Event> for IndexedEventPositionKey {
-    const PATH: &'static str = keys::EVENTS_POSITION_KEY_PATH;
-
     type KeyComponents = Position;
 
     fn index() -> Option<&'static str> {
@@ -397,8 +389,6 @@ pub type IndexedEventPositionIndex = usize;
 pub struct IndexedEventRelationKey(IndexedRoomId, IndexedEventId, IndexedRelationType);
 
 impl IndexedKey<Event> for IndexedEventRelationKey {
-    const PATH: &'static str = keys::EVENTS_RELATION_KEY_PATH;
-
     type KeyComponents = (OwnedEventId, RelationType);
 
     fn index() -> Option<&'static str> {
@@ -492,8 +482,6 @@ impl Indexed for Gap {
 pub type IndexedGapIdKey = IndexedChunkIdKey;
 
 impl IndexedKey<Gap> for IndexedGapIdKey {
-    const PATH: &'static str = keys::GAPS_KEY_PATH;
-
     type KeyComponents = <IndexedChunkIdKey as IndexedKey<Chunk>>::KeyComponents;
 
     fn encode(
