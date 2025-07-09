@@ -20,11 +20,13 @@ use std::path::Path;
 use std::{fmt, sync::Arc};
 
 use homeserver_config::*;
-use matrix_sdk_base::{store::StoreConfig, BaseClient};
+#[cfg(feature = "e2e-encryption")]
+use matrix_sdk_base::crypto::DecryptionSettings;
+use matrix_sdk_base::{store::StoreConfig, BaseClient, ThreadingSupport};
 #[cfg(feature = "sqlite")]
 use matrix_sdk_sqlite::SqliteStoreConfig;
 use ruma::{
-    api::{error::FromHttpResponseError, MatrixVersion},
+    api::{error::FromHttpResponseError, MatrixVersion, SupportedVersions},
     OwnedServerName, ServerName,
 };
 use thiserror::Error;
@@ -107,10 +109,11 @@ pub struct ClientBuilder {
     #[cfg(feature = "e2e-encryption")]
     room_key_recipient_strategy: CollectStrategy,
     #[cfg(feature = "e2e-encryption")]
-    decryption_trust_requirement: TrustRequirement,
+    decryption_settings: DecryptionSettings,
     #[cfg(feature = "e2e-encryption")]
     enable_share_history_on_invite: bool,
     cross_process_store_locks_holder_name: String,
+    threading_support: ThreadingSupport,
 }
 
 impl ClientBuilder {
@@ -134,11 +137,14 @@ impl ClientBuilder {
             #[cfg(feature = "e2e-encryption")]
             room_key_recipient_strategy: Default::default(),
             #[cfg(feature = "e2e-encryption")]
-            decryption_trust_requirement: TrustRequirement::Untrusted,
+            decryption_settings: DecryptionSettings {
+                sender_device_trust_requirement: TrustRequirement::Untrusted,
+            },
             #[cfg(feature = "e2e-encryption")]
             enable_share_history_on_invite: false,
             cross_process_store_locks_holder_name:
                 Self::DEFAULT_CROSS_PROCESS_STORE_LOCKS_HOLDER_NAME.to_owned(),
+            threading_support: ThreadingSupport::Disabled,
         }
     }
 
@@ -443,11 +449,8 @@ impl ClientBuilder {
 
     /// Set the trust requirement to be used when decrypting events.
     #[cfg(feature = "e2e-encryption")]
-    pub fn with_decryption_trust_requirement(
-        mut self,
-        trust_requirement: TrustRequirement,
-    ) -> Self {
-        self.decryption_trust_requirement = trust_requirement;
+    pub fn with_decryption_settings(mut self, decryption_settings: DecryptionSettings) -> Self {
+        self.decryption_settings = decryption_settings;
         self
     }
 
@@ -475,6 +478,14 @@ impl ClientBuilder {
     /// method must be called with different `hold_name` values.
     pub fn cross_process_store_locks_holder_name(mut self, holder_name: String) -> Self {
         self.cross_process_store_locks_holder_name = holder_name;
+        self
+    }
+
+    /// Whether the threads feature is enabled throuoghout the SDK.
+    /// This will affect how timelines are setup, how read receipts are sent
+    /// and how room unreads are computed.
+    pub fn with_threading_support(mut self, threading_support: ThreadingSupport) -> Self {
+        self.threading_support = threading_support;
         self
     }
 
@@ -514,12 +525,13 @@ impl ClientBuilder {
             let mut client = BaseClient::new(
                 build_store_config(self.store_config, &self.cross_process_store_locks_holder_name)
                     .await?,
+                self.threading_support,
             );
 
             #[cfg(feature = "e2e-encryption")]
             {
                 client.room_key_recipient_strategy = self.room_key_recipient_strategy;
-                client.decryption_trust_requirement = self.decryption_trust_requirement;
+                client.decryption_settings = self.decryption_settings;
             }
 
             client
@@ -540,7 +552,9 @@ impl ClientBuilder {
                 None => None,
             };
 
-            let version = self.sliding_sync_version_builder.build(supported_versions.as_ref())?;
+            let version = self.sliding_sync_version_builder.build(
+                supported_versions.map(|response| response.as_supported_versions()).as_ref(),
+            )?;
 
             tracing::info!(?version, "selected sliding sync version");
 
@@ -564,15 +578,18 @@ impl ClientBuilder {
         let send_queue = Arc::new(SendQueueData::new(true));
 
         let server_info = ClientServerInfo {
-            server_versions: match self.server_versions {
-                Some(versions) => Cached(versions),
+            supported_versions: match self.server_versions {
+                Some(versions) => {
+                    Cached(SupportedVersions { versions, features: Default::default() })
+                }
                 None => NotSet,
             },
-            unstable_features: NotSet,
             well_known: Cached(well_known.map(Into::into)),
         };
 
         let event_cache = OnceCell::new();
+        let latest_events = OnceCell::new();
+
         let inner = ClientInner::new(
             auth_ctx,
             server,
@@ -584,6 +601,7 @@ impl ClientBuilder {
             self.respect_login_well_known,
             event_cache,
             send_queue,
+            latest_events,
             #[cfg(feature = "e2e-encryption")]
             self.encryption_settings,
             #[cfg(feature = "e2e-encryption")]
@@ -679,7 +697,10 @@ async fn build_indexeddb_store_config(
     };
 
     let store_config = {
-        tracing::warn!("The IndexedDB backend does not implement an event cache store, falling back to the in-memory event cache store…");
+        tracing::warn!(
+            "The IndexedDB backend does not implement an event cache store, \
+             falling back to the in-memory event cache store…"
+        );
         store_config.event_cache_store(matrix_sdk_base::event_cache::store::MemoryStore::new())
     };
 
@@ -975,11 +996,13 @@ pub(crate) mod tests {
         let homeserver = make_mock_homeserver().await;
         let builder = ClientBuilder::new()
             .server_name_or_homeserver_url(homeserver.uri())
-            .with_decryption_trust_requirement(TrustRequirement::CrossSigned);
+            .with_decryption_settings(DecryptionSettings {
+                sender_device_trust_requirement: TrustRequirement::CrossSigned,
+            });
 
         let client = builder.build().await.unwrap();
         assert_matches!(
-            client.base_client().decryption_trust_requirement,
+            client.base_client().decryption_settings.sender_device_trust_requirement,
             TrustRequirement::CrossSigned
         );
     }
@@ -991,11 +1014,13 @@ pub(crate) mod tests {
 
         let builder = ClientBuilder::new()
             .server_name_or_homeserver_url(homeserver.uri())
-            .with_decryption_trust_requirement(TrustRequirement::Untrusted);
+            .with_decryption_settings(DecryptionSettings {
+                sender_device_trust_requirement: TrustRequirement::Untrusted,
+            });
 
         let client = builder.build().await.unwrap();
         assert_matches!(
-            client.base_client().decryption_trust_requirement,
+            client.base_client().decryption_settings.sender_device_trust_requirement,
             TrustRequirement::Untrusted
         );
     }

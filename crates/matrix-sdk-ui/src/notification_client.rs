@@ -13,10 +13,7 @@
 // limitations under the License.
 
 use std::{
-    collections::{
-        btree_map::{IntoIter, Iter},
-        BTreeMap,
-    },
+    collections::BTreeMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -143,18 +140,16 @@ impl NotificationClient {
     /// `/context` query to find the event with associated member information.
     ///
     /// An error result means that we couldn't resolve the notification; in that
-    /// case, a dummy notification may be displayed instead. A `None` result
-    /// means the notification has been filtered out by the user's push
-    /// rules.
+    /// case, a dummy notification may be displayed instead.
     #[instrument(skip(self))]
     pub async fn get_notification(
         &self,
         room_id: &RoomId,
         event_id: &EventId,
-    ) -> Result<Option<NotificationItem>, Error> {
-        match self.get_notification_with_sliding_sync(room_id, event_id).await? {
-            NotificationStatus::Event(event) => Ok(Some(*event)),
-            NotificationStatus::EventFilteredOut => Ok(None),
+    ) -> Result<NotificationStatus, Error> {
+        let status = self.get_notification_with_sliding_sync(room_id, event_id).await?;
+        match status {
+            NotificationStatus::Event(..) | NotificationStatus::EventFilteredOut => Ok(status),
             NotificationStatus::EventNotFound => {
                 self.get_notification_with_context(room_id, event_id).await
             }
@@ -168,56 +163,47 @@ impl NotificationClient {
     /// `/context` query to find the events with associated member information.
     ///
     /// An error result at the top level means that something failed when trying
-    /// to set up the notification fetching. For each notification item you can
-    /// also receive an error, which means something failed when trying to fetch
-    /// that particular notification (decryption, fetching push actions, etc.);
-    /// in that case, a dummy notification may be displayed instead. A
-    /// `None` result means the notification has been filtered out by the
-    /// user's push rules.
+    /// to set up the notification fetching.
+    ///
+    /// For each notification item you can also receive an error, which means
+    /// something failed when trying to fetch that particular notification
+    /// (decryption, fetching push actions, etc.); in that case, a dummy
+    /// notification may be displayed instead.
     pub async fn get_notifications(
         &self,
         requests: &[NotificationItemsRequest],
-    ) -> Result<BatchNotificationFetchingResult<NotificationItem>, Error> {
+    ) -> Result<BatchNotificationFetchingResult, Error> {
         let mut notifications = self.get_notifications_with_sliding_sync(requests).await?;
-        let mut notification_items = BatchNotificationFetchingResult::new();
 
         for request in requests {
             for event_id in &request.event_ids {
-                match notifications.remove(event_id) {
-                    Some(Ok(NotificationStatus::Event(item))) => {
-                        notification_items.add_notification(event_id.to_owned(), *item);
-                    }
+                match notifications.get_mut(event_id) {
+                    // If the notification for a given event wasn't found with sliding sync, try
+                    // with a /context for each event.
                     Some(Ok(NotificationStatus::EventNotFound)) | None => {
-                        match self.get_notification_with_context(&request.room_id, event_id).await {
-                            Ok(Some(item)) => {
-                                notification_items.add_notification(event_id.to_owned(), item)
-                            }
-                            // Event filtered out, do nothing
-                            Ok(None) => (),
-                            Err(error) => notification_items
-                                .mark_fetching_notification_failed(event_id.to_owned(), error),
-                        }
+                        notifications.insert(
+                            event_id.to_owned(),
+                            self.get_notification_with_context(&request.room_id, event_id).await,
+                        );
                     }
-                    // Event filtered out, do nothing
-                    Some(Ok(NotificationStatus::EventFilteredOut)) => (),
-                    Some(Err(e)) => {
-                        notification_items
-                            .mark_fetching_notification_failed(event_id.to_owned(), e);
-                    }
+
+                    _ => {}
                 }
             }
         }
 
-        Ok(notification_items)
+        Ok(notifications)
     }
 
     /// Run an encryption sync loop, in case an event is still encrypted.
     ///
-    /// Will return true if and only:
+    /// Will return `Ok(Some)` if and only if:
     /// - the event was encrypted,
     /// - we successfully ran an encryption sync or waited long enough for an
-    ///   existing encryption sync to
-    /// decrypt the event.
+    ///   existing encryption sync to decrypt the event.
+    ///
+    /// Otherwise, if the event was not encrypted, or couldn't be decrypted
+    /// (without causing a fatal error), will return `Ok(None)`.
     #[instrument(skip_all)]
     async fn retry_decryption(
         &self,
@@ -419,7 +405,7 @@ impl NotificationClient {
                         warn!("a sync event had no event id");
                     }
                     Err(err) => {
-                        warn!("a sync event id couldn't be decoded: {err}");
+                        warn!("failed to deserialize sync event id: {err}");
                     }
                 }
             }
@@ -465,10 +451,10 @@ impl NotificationClient {
                         return;
                     }
                     Ok(None) => {
-                        debug!("a room member event had no id");
+                        warn!("a room member event had no id");
                     }
                     Err(err) => {
-                        debug!("a room member event id couldn't be decoded: {err}");
+                        warn!("failed to deserialize room member event id: {err}");
                     }
                 }
 
@@ -476,7 +462,7 @@ impl NotificationClient {
                 if deserialized.content.membership == MembershipState::Invite
                     && deserialized.state_key == user_id
                 {
-                    debug!("found an invite event for the current user");
+                    trace!("found an invite event for the current user");
                     // This could be it! There might be several of these following each other, so
                     // assume it's the latest one (in sync ordering), and override a previous one if
                     // present.
@@ -485,7 +471,7 @@ impl NotificationClient {
                         .unwrap()
                         .insert(deserialized.state_key, Some(RawNotificationEvent::Invite(raw)));
                 } else {
-                    debug!("not an invite event, or not for the current user");
+                    trace!("not an invite event, or not for the current user");
                 }
             }
         });
@@ -498,6 +484,7 @@ impl NotificationClient {
             (StateEventType::RoomCanonicalAlias, "".to_owned()),
             (StateEventType::RoomName, "".to_owned()),
             (StateEventType::RoomPowerLevels, "".to_owned()),
+            (StateEventType::RoomJoinRules, "".to_owned()),
             (StateEventType::CallMember, "*".to_owned()),
         ];
 
@@ -566,7 +553,7 @@ impl NotificationClient {
         let mut notifications = raw_notifications.clone().lock().unwrap().clone();
         let mut missing_event_ids = Vec::new();
 
-        // Create the list of missing event ids after the syncs
+        // Create the list of missing event ids after the syncs.
         for request in requests.iter() {
             for event_id in &request.event_ids {
                 if !notifications.contains_key(event_id) {
@@ -575,7 +562,7 @@ impl NotificationClient {
             }
         }
 
-        // Try checking if the missing notifications could be invites
+        // Try checking if the missing notifications could be invites.
         for (room_id, missing_event_id) in missing_event_ids {
             trace!("we didn't have a non-invite event, looking for invited room now");
             if let Some(room) = self.client.get_room(&room_id) {
@@ -590,7 +577,7 @@ impl NotificationClient {
                     debug!("the room isn't in the invited state");
                 }
             } else {
-                debug!("the room isn't an invite");
+                warn!(%room_id, "unknown room, can't check for invite events");
             }
         }
 
@@ -605,10 +592,16 @@ impl NotificationClient {
         room_id: &RoomId,
         event_id: &EventId,
     ) -> Result<NotificationStatus, Error> {
-        let event_ids = vec![event_id.to_owned()];
-        let request = NotificationItemsRequest { room_id: room_id.to_owned(), event_ids };
+        info!("fetching notification event with a sliding sync");
+
+        let request = NotificationItemsRequest {
+            room_id: room_id.to_owned(),
+            event_ids: vec![event_id.to_owned()],
+        };
+
         let mut get_notifications_result =
             self.get_notifications_with_sliding_sync(&[request]).await?;
+
         get_notifications_result.remove(event_id).unwrap_or(Ok(NotificationStatus::EventNotFound))
     }
 
@@ -619,106 +612,105 @@ impl NotificationClient {
     pub async fn get_notifications_with_sliding_sync(
         &self,
         requests: &[NotificationItemsRequest],
-    ) -> Result<BatchNotificationFetchingResult<NotificationStatus>, Error> {
+    ) -> Result<BatchNotificationFetchingResult, Error> {
         let raw_events = self.try_sliding_sync(requests).await?;
 
-        let mut result = BatchNotificationFetchingResult::new();
+        let mut batch_result = BatchNotificationFetchingResult::new();
 
         for (event_id, (room_id, raw_event)) in raw_events.into_iter() {
             // At this point it should have been added by the sync, if it's not, give up.
             let Some(room) = self.client.get_room(&room_id) else { return Err(Error::UnknownRoom) };
 
-            if let Some(raw_event) = raw_event {
-                let (raw_event, push_actions) = match &raw_event {
-                    RawNotificationEvent::Timeline(timeline_event) => {
-                        // Timeline events may be encrypted, so make sure they get decrypted first.
-                        match self.retry_decryption(&room, timeline_event).await {
-                            Ok(Some(timeline_event)) => {
-                                let push_actions =
-                                    timeline_event.push_actions().map(ToOwned::to_owned);
-                                (
-                                    RawNotificationEvent::Timeline(timeline_event.into_raw()),
-                                    push_actions,
-                                )
-                            }
-                            Ok(None) => {
-                                match room.event_push_actions(timeline_event).await {
-                                    Ok(push_actions) => (raw_event.clone(), push_actions),
-                                    Err(error) => {
-                                        // Could not get push actions,
-                                        result.mark_fetching_notification_failed(
-                                            event_id,
-                                            error.into(),
-                                        );
-                                        continue;
-                                    }
+            let Some(raw_event) = raw_event else {
+                // The event was not found, so we can't build a notification.
+                batch_result.insert(event_id, Ok(NotificationStatus::EventNotFound));
+                continue;
+            };
+
+            let (raw_event, push_actions) = match &raw_event {
+                RawNotificationEvent::Timeline(timeline_event) => {
+                    // Timeline events may be encrypted, so make sure they get decrypted first.
+                    match self.retry_decryption(&room, timeline_event).await {
+                        Ok(Some(timeline_event)) => {
+                            let push_actions = timeline_event.push_actions().map(ToOwned::to_owned);
+                            (
+                                RawNotificationEvent::Timeline(timeline_event.into_raw()),
+                                push_actions,
+                            )
+                        }
+
+                        Ok(None) => {
+                            // The event was either not encrypted in the first place, or we
+                            // couldn't decrypt it after retrying. Use the raw event as is.
+                            match room.event_push_actions(timeline_event).await {
+                                Ok(push_actions) => (raw_event.clone(), push_actions),
+                                Err(err) => {
+                                    // Could not get push actions.
+                                    batch_result.insert(event_id, Err(err.into()));
+                                    continue;
                                 }
                             }
-                            Err(error) => {
-                                result.mark_fetching_notification_failed(event_id, error);
-                                continue;
-                            }
                         }
-                    }
-                    RawNotificationEvent::Invite(invite_event) => {
-                        // Invite events can't be encrypted, so they should be in clear text.
-                        match room.event_push_actions(invite_event).await {
-                            Ok(push_actions) => {
-                                (RawNotificationEvent::Invite(invite_event.clone()), push_actions)
-                            }
-                            Err(error) => {
-                                result.mark_fetching_notification_failed(event_id, error.into());
-                                continue;
-                            }
-                        }
-                    }
-                };
 
-                let should_notify = push_actions
-                    .as_ref()
-                    .map(|actions| actions.iter().any(|a| a.should_notify()))
-                    .unwrap_or(false);
-
-                if !should_notify {
-                    result.add_notification(event_id, NotificationStatus::EventFilteredOut);
-                } else {
-                    let notification_result = NotificationItem::new(
-                        &room,
-                        raw_event,
-                        push_actions.as_deref(),
-                        Vec::new(),
-                    )
-                    .await
-                    .map(|event| NotificationStatus::Event(Box::new(event)));
-
-                    match notification_result {
-                        Ok(notification_status) => match notification_status {
-                            NotificationStatus::Event(event) => {
-                                if self.client.is_user_ignored(event.event.sender()).await {
-                                    result.add_notification(
-                                        event_id,
-                                        NotificationStatus::EventFilteredOut,
-                                    );
-                                } else {
-                                    result.add_notification(
-                                        event_id,
-                                        NotificationStatus::Event(event),
-                                    );
-                                }
-                            }
-                            _ => result.add_notification(event_id, notification_status),
-                        },
-                        Err(error) => {
-                            result.mark_fetching_notification_failed(event_id, error);
+                        Err(err) => {
+                            batch_result.insert(event_id, Err(err));
+                            continue;
                         }
                     }
                 }
-            } else {
-                result.add_notification(event_id, NotificationStatus::EventNotFound);
+
+                RawNotificationEvent::Invite(invite_event) => {
+                    // Invite events can't be encrypted, so they should be in clear text.
+                    match room.event_push_actions(invite_event).await {
+                        Ok(push_actions) => {
+                            (RawNotificationEvent::Invite(invite_event.clone()), push_actions)
+                        }
+                        Err(err) => {
+                            batch_result.insert(event_id, Err(err.into()));
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            let should_notify = push_actions
+                .as_ref()
+                .is_some_and(|actions| actions.iter().any(|a| a.should_notify()));
+
+            if !should_notify {
+                // The event has been filtered out by the user's push rules.
+                batch_result.insert(event_id, Ok(NotificationStatus::EventFilteredOut));
+                continue;
+            }
+
+            let status =
+                match NotificationItem::new(&room, raw_event, push_actions.as_deref(), Vec::new())
+                    .await
+                    .map(|event| NotificationStatus::Event(Box::new(event)))
+                {
+                    Ok(status) => status,
+                    Err(err) => {
+                        // Could not build the notification item, return an error.
+                        batch_result.insert(event_id, Err(err));
+                        continue;
+                    }
+                };
+
+            match status {
+                NotificationStatus::Event(event) => {
+                    if self.client.is_user_ignored(event.event.sender()).await {
+                        batch_result.insert(event_id, Ok(NotificationStatus::EventFilteredOut));
+                    } else {
+                        batch_result.insert(event_id, Ok(NotificationStatus::Event(event)));
+                    }
+                }
+                _ => {
+                    batch_result.insert(event_id, Ok(status));
+                }
             }
         }
 
-        Ok(result)
+        Ok(batch_result)
     }
 
     /// Retrieve a notification using a `/context` query.
@@ -737,7 +729,7 @@ impl NotificationClient {
         &self,
         room_id: &RoomId,
         event_id: &EventId,
-    ) -> Result<Option<NotificationItem>, Error> {
+    ) -> Result<NotificationStatus, Error> {
         info!("fetching notification event with a /context query");
 
         // See above comment.
@@ -756,7 +748,7 @@ impl NotificationClient {
 
         if let Some(actions) = timeline_event.push_actions() {
             if !actions.iter().any(|a| a.should_notify()) {
-                return Ok(None);
+                return Ok(NotificationStatus::EventFilteredOut);
             }
         }
 
@@ -770,9 +762,9 @@ impl NotificationClient {
         .await?;
 
         if self.client.is_user_ignored(notification_item.event.sender()).await {
-            Ok(None)
+            Ok(NotificationStatus::EventFilteredOut)
         } else {
-            Ok(Some(notification_item))
+            Ok(NotificationStatus::Event(Box::new(notification_item)))
         }
     }
 }
@@ -789,8 +781,13 @@ fn is_event_encrypted(event_type: TimelineEventType) -> bool {
 
 #[derive(Debug)]
 pub enum NotificationStatus {
+    /// The event has been found and was not filtered out.
     Event(Box<NotificationItem>),
+    /// The event couldn't be found in the network queries used to find it.
     EventNotFound,
+    /// The event has been filtered out, either because of the user's push
+    /// rules, or because the user which triggered it is ignored by the
+    /// current user.
     EventFilteredOut,
 }
 
@@ -800,40 +797,7 @@ pub struct NotificationItemsRequest {
     pub event_ids: Vec<OwnedEventId>,
 }
 
-#[derive(Default)]
-pub struct BatchNotificationFetchingResult<T> {
-    notifications: BTreeMap<OwnedEventId, Result<T, Error>>,
-}
-
-impl<T> BatchNotificationFetchingResult<T> {
-    pub fn new() -> Self {
-        Self { notifications: BTreeMap::new() }
-    }
-
-    fn add_notification(&mut self, event_id: OwnedEventId, notification: T) {
-        self.notifications.insert(event_id, Ok(notification));
-    }
-
-    fn mark_fetching_notification_failed(&mut self, event_id: OwnedEventId, error: Error) {
-        self.notifications.insert(event_id, Err(error));
-    }
-
-    pub fn remove(&mut self, id: &EventId) -> Option<Result<T, Error>> {
-        self.notifications.remove(id)
-    }
-
-    pub fn iter(&self) -> Iter<'_, OwnedEventId, Result<T, Error>> {
-        self.notifications.iter()
-    }
-}
-
-impl<T> IntoIterator for BatchNotificationFetchingResult<T> {
-    type Item = (OwnedEventId, Result<T, Error>);
-    type IntoIter = IntoIter<OwnedEventId, Result<T, Error>>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.notifications.into_iter()
-    }
-}
+type BatchNotificationFetchingResult = BTreeMap<OwnedEventId, Result<NotificationStatus, Error>>;
 
 /// The Notification event as it was fetched from remote for the
 /// given `event_id`, represented as Raw but decrypted, thus only
@@ -908,12 +872,14 @@ pub struct NotificationItem {
     pub room_avatar_url: Option<String>,
     /// Room canonical alias.
     pub room_canonical_alias: Option<String>,
+    /// Room topic.
+    pub room_topic: Option<String>,
     /// Room join rule.
-    pub room_join_rule: JoinRule,
+    ///
+    /// Set to `None` if the join rule for this room is not available.
+    pub room_join_rule: Option<JoinRule>,
     /// Is this room encrypted?
     pub is_room_encrypted: Option<bool>,
-    /// Is this a public room?
-    pub is_room_public: bool,
     /// Is this room considered a direct message?
     pub is_direct_message_room: bool,
     /// Numbers of members who joined the room.
@@ -971,8 +937,8 @@ impl NotificationItem {
             for ev in state_events {
                 let ev = match ev.deserialize() {
                     Ok(ev) => ev,
-                    Err(error) => {
-                        warn!(?error, "Failed to deserialize a state event");
+                    Err(err) => {
+                        warn!("Failed to deserialize a state event: {err}");
                         continue;
                     }
                 };
@@ -1007,9 +973,9 @@ impl NotificationItem {
             room_computed_display_name: room.display_name().await?.to_string(),
             room_avatar_url: room.avatar_url().map(|s| s.to_string()),
             room_canonical_alias: room.canonical_alias().map(|c| c.to_string()),
+            room_topic: room.topic(),
             room_join_rule: room.join_rule(),
             is_direct_message_room: room.is_direct().await?,
-            is_room_public: room.is_public(),
             is_room_encrypted: room
                 .latest_encryption_state()
                 .await
@@ -1022,6 +988,13 @@ impl NotificationItem {
         };
 
         Ok(item)
+    }
+
+    /// Returns whether this room is public or not, based on the join rule.
+    ///
+    /// Maybe return `None` if the join rule is not available.
+    pub fn is_public(&self) -> Option<bool> {
+        self.room_join_rule.as_ref().map(|rule| matches!(rule, JoinRule::Public))
     }
 }
 

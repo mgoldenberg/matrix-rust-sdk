@@ -229,7 +229,10 @@ pub enum CrossProcessRefreshLockError {
     MissingLock,
 
     /// Cross-process lock was set, but without session callbacks.
-    #[error("reload session callback must be set with Client::set_session_callbacks() for the cross-process lock to work")]
+    #[error(
+        "reload session callback must be set with Client::set_session_callbacks() \
+         for the cross-process lock to work"
+    )]
     MissingReloadSession,
 
     /// The store has been created twice.
@@ -266,11 +269,7 @@ mod tests {
         // Create a client that will use sqlite databases.
 
         let tmp_dir = tempfile::tempdir()?;
-        let client = MockClientBuilder::new("https://example.org".to_owned())
-            .sqlite_store(&tmp_dir)
-            .unlogged()
-            .build()
-            .await;
+        let client = MockClientBuilder::new(None).sqlite_store(&tmp_dir).unlogged().build().await;
 
         let tokens = mock_session_tokens_with_refresh();
 

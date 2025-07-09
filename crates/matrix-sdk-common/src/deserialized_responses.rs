@@ -17,7 +17,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 #[cfg(doc)]
 use ruma::events::AnyTimelineEvent;
 use ruma::{
-    events::{AnyMessageLikeEvent, AnySyncTimelineEvent, AnyToDeviceEvent},
+    events::{AnyMessageLikeEvent, AnySyncTimelineEvent, AnyToDeviceEvent, MessageLikeEventType},
     push::Action,
     serde::{
         AsRefStr, AsStrAsRefStr, DebugAsRefStr, DeserializeFromCowStr, FromString, JsonObject, Raw,
@@ -42,8 +42,9 @@ const VERIFICATION_VIOLATION: &str =
     "Encrypted by a previously-verified user who is no longer verified.";
 const UNSIGNED_DEVICE: &str = "Encrypted by a device not verified by its owner.";
 const UNKNOWN_DEVICE: &str = "Encrypted by an unknown or deleted device.";
-const MISMATCHED_SENDER: &str =
-    "The sender of the event does not match the owner of the device that created the Megolm session.";
+const MISMATCHED_SENDER: &str = "\
+    The sender of the event does not match the owner of the device \
+    that created the Megolm session.";
 pub const SENT_IN_CLEAR: &str = "Not encrypted.";
 
 /// Represents the state of verification for a decrypted message sent by a
@@ -585,16 +586,18 @@ impl TimelineEvent {
             }
         }
 
-        let deserialized = match latest_event.deserialize() {
-            Ok(ev) => ev,
-            Err(err) => {
-                warn!("couldn't deserialize bundled latest thread event: {err}");
-                return None;
+        match latest_event.get_field::<MessageLikeEventType>("type") {
+            Ok(None) => {
+                let event_id = latest_event.get_field::<OwnedEventId>("event_id").ok().flatten();
+                warn!(
+                    ?event_id,
+                    "couldn't deserialize bundled latest thread event: missing `type` field \
+                     in bundled latest thread event"
+                );
+                None
             }
-        };
 
-        match deserialized {
-            AnyMessageLikeEvent::RoomEncrypted(_) => {
+            Ok(Some(MessageLikeEventType::RoomEncrypted)) => {
                 // The bundled latest thread event is encrypted, but we didn't have any
                 // information about it in the unsigned map. Provide some dummy
                 // UTD info, since we can't really do much better.
@@ -607,7 +610,13 @@ impl TimelineEvent {
                 )))
             }
 
-            _ => Some(Box::new(TimelineEvent::from_plaintext(latest_event.cast()))),
+            Ok(_) => Some(Box::new(TimelineEvent::from_plaintext(latest_event.cast()))),
+
+            Err(err) => {
+                let event_id = latest_event.get_field::<OwnedEventId>("event_id").ok().flatten();
+                warn!(?event_id, "couldn't deserialize bundled latest thread event's type: {err}");
+                None
+            }
         }
     }
 
@@ -1532,6 +1541,7 @@ mod tests {
                             "origin_server_ts": 42,
                             "content": {
                                 "body": "Hello to you too!",
+                                "msgtype": "m.text",
                             }
                         },
                         "count": 2,
@@ -1551,6 +1561,8 @@ mod tests {
             assert_eq!(latest_reply.as_deref(), Some(event_id!("$latest_event:example.com")));
         });
 
+        assert!(timeline_event.bundled_latest_thread_event.is_some());
+
         // When deserializing an old serialized timeline event, the thread summary is
         // also extracted, if it wasn't serialized.
         let serialized_timeline_item = json!({
@@ -1564,6 +1576,10 @@ mod tests {
         let timeline_event: TimelineEvent =
             serde_json::from_value(serialized_timeline_item).unwrap();
         assert_matches!(timeline_event.thread_summary, ThreadSummaryStatus::Unknown);
+
+        // The bundled latest thread event is not persisted, so it should be `None` when
+        // deserialized from a previously serialized `TimelineEvent`.
+        assert!(timeline_event.bundled_latest_thread_event.is_none());
     }
 
     #[test]

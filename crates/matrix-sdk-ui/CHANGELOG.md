@@ -6,6 +6,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - ReleaseDate
 
+### Features
+
+- Infer timeline read receipt threads for the `send_single_receipt` method from
+  the focus mode and associated `hide_threaded_events` flag.
+  ([5325](https://github.com/matrix-org/matrix-rust-sdk/pull/5325))
+- Add `NotificationItem::room_topic` to the `NotificationItem` struct, which
+  contains the topic of the room. This is useful for displaying the room topic
+  in notifications.
+  ([#5300](https://github.com/matrix-org/matrix-rust-sdk/pull/5300))
+- Add `EmbeddedEvent::timestamp` and `EmbeddedEvent::identifier` which are already
+  available in regular timeline items.
+  ([#5331](https://github.com/matrix-org/matrix-rust-sdk/pull/5331))
+- `RoomListService::subscribe_to_rooms` becomes `async` and automatically calls
+  `matrix_sdk::latest_events::LatestEvents::listen_to_room`
+  ([#5369](https://github.com/matrix-org/matrix-rust-sdk/pull/5369))
+
 ## [0.12.0] - 2025-06-10
 
 ### Refactor
@@ -13,6 +29,10 @@ All notable changes to this project will be documented in this file.
 - [**breaking**] [`TimelineItemContent::reactions()`] returns an `Option<&ReactionsByKeyBySender>`
   instead of `ReactionsByKeyBySender`. This reflects the fact that some timeline items cannot hold
   reactions at all.
+- `NotificationItem::room_join_rule` is now optional to reflect that the join rule
+  state event might be missing, in which case it will be set to `None`. The
+  `NotificationItem::is_public` field has been replaced with a method that returns an `Option<bool>`, based on the same logic.
+  ([#5278](https://github.com/matrix-org/matrix-rust-sdk/pull/5278))
 
 ### Bug Fixes
 

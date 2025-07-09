@@ -5,6 +5,7 @@ use std::{
 };
 
 use assert_matches::assert_matches;
+use assert_matches2::assert_let;
 use matrix_sdk::{
     config::SyncSettings,
     test_utils::{logged_in_client_with_server, mocks::MatrixMockServer},
@@ -104,7 +105,7 @@ async fn test_notification_client_with_context() {
 
     server.reset().await;
 
-    let item = item.expect("the notification should be found");
+    assert_let!(NotificationStatus::Event(item) = item);
 
     assert_matches!(item.event, NotificationEvent::Timeline(event) => {
         assert_eq!(event.event_type(), TimelineEventType::RoomMessage);
@@ -227,6 +228,7 @@ async fn test_notification_client_sliding_sync() {
                         ["m.room.canonical_alias", ""],
                         ["m.room.name", ""],
                         ["m.room.power_levels", ""],
+                        ["m.room.join_rules", ""],
                         ["org.matrix.msc3401.call.member", "*"],
                     ],
                     "filters": {
@@ -245,6 +247,7 @@ async fn test_notification_client_sliding_sync() {
                         ["m.room.canonical_alias", ""],
                         ["m.room.name", ""],
                         ["m.room.power_levels", ""],
+                        ["m.room.join_rules", ""],
                         ["org.matrix.msc3401.call.member", "*"],
                     ],
                     "timeline_limit": 16,
@@ -757,6 +760,7 @@ async fn test_notification_client_mixed() {
 
     let _ = result.remove(event_id2).expect("fetching notification from /context failed");
 
+    assert_let!(NotificationStatus::Event(item) = item);
     assert_matches!(item.event, NotificationEvent::Timeline(event) => {
         assert_eq!(event.event_type(), TimelineEventType::RoomMessage);
     });
@@ -937,9 +941,9 @@ async fn test_notification_client_context_filters_out_events_from_ignored_users(
         .await;
 
     // If the event is not found even though there was a mocked response for it, it
-    // was discarded as expected
+    // was discarded as expected.
     let result =
         notification_client.get_notification_with_context(room_id, event_id).await.unwrap();
 
-    assert!(result.is_none());
+    assert_matches!(result, NotificationStatus::EventFilteredOut);
 }

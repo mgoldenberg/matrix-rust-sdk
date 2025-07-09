@@ -12,9 +12,93 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
-use matrix_sdk_base::{SendOutsideWasm, SyncOutsideWasm};
+use matrix_sdk_base::{
+    event_cache::store::{EventCacheStore, EventCacheStoreError, MemoryStore},
+    SendOutsideWasm, SyncOutsideWasm,
+};
+use matrix_sdk_crypto::CryptoStoreError;
+use serde::de::Error;
+use thiserror::Error;
 
+use crate::{
+    event_cache_store::{
+        serializer::IndexeddbEventCacheStoreSerializerError,
+        transaction::IndexeddbEventCacheStoreTransactionError,
+    },
+    serializer::IndexeddbSerializerError,
+};
+
+/// A trait that combines the necessary traits needed for asynchronous runtimes,
+/// but excludes them when running in a web environment - i.e., when
+/// `#[cfg(target_family = "wasm")]`.
 pub trait AsyncErrorDeps: std::error::Error + SendOutsideWasm + SyncOutsideWasm + 'static {}
 
 impl<T> AsyncErrorDeps for T where T: std::error::Error + SendOutsideWasm + SyncOutsideWasm + 'static
 {}
+
+#[derive(Debug, Error)]
+pub enum IndexeddbEventCacheStoreError {
+    #[error("DomException {name} ({code}): {message}")]
+    DomException { name: String, message: String, code: u16 },
+    #[error("chunks contain disjoint lists")]
+    ChunksContainDisjointLists,
+    #[error("chunks contain cycle")]
+    ChunksContainCycle,
+    #[error("unable to load chunk")]
+    UnableToLoadChunk,
+    #[error("no max chunk id")]
+    NoMaxChunkId,
+    #[error("transaction: {0}")]
+    Transaction(#[from] IndexeddbEventCacheStoreTransactionError),
+    #[error("media store: {0}")]
+    MemoryStore(<MemoryStore as EventCacheStore>::Error),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    CryptoStoreError(#[from] CryptoStoreError),
+}
+
+impl From<web_sys::DomException> for IndexeddbEventCacheStoreError {
+    fn from(value: web_sys::DomException) -> IndexeddbEventCacheStoreError {
+        IndexeddbEventCacheStoreError::DomException {
+            name: value.name(),
+            message: value.message(),
+            code: value.code(),
+        }
+    }
+}
+
+impl From<IndexeddbEventCacheStoreError> for EventCacheStoreError {
+    fn from(value: IndexeddbEventCacheStoreError) -> Self {
+        use IndexeddbEventCacheStoreError::*;
+
+        match value {
+            CryptoStoreError(_)
+            | DomException { .. }
+            | ChunksContainCycle
+            | ChunksContainDisjointLists
+            | NoMaxChunkId
+            | UnableToLoadChunk => Self::InvalidData { details: value.to_string() },
+            Transaction(inner) => inner.into(),
+            MemoryStore(inner) => inner,
+            Json(e) => Self::Serialization(e),
+        }
+    }
+}
+
+impl From<IndexeddbEventCacheStoreSerializerError<IndexeddbSerializerError>>
+    for IndexeddbEventCacheStoreError
+{
+    fn from(value: IndexeddbEventCacheStoreSerializerError<IndexeddbSerializerError>) -> Self {
+        match value {
+            IndexeddbEventCacheStoreSerializerError::Indexing(e) => match e {
+                IndexeddbSerializerError::Serialization(e) => e.into(),
+                IndexeddbSerializerError::DomException { code, name, message } => {
+                    Self::DomException { name, message, code }
+                }
+                IndexeddbSerializerError::CryptoStoreError(e) => e.into(),
+            },
+            IndexeddbEventCacheStoreSerializerError::Serialization(e) => e.into(),
+        }
+    }
+}

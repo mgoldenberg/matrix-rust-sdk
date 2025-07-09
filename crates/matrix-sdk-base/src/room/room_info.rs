@@ -19,7 +19,7 @@ use std::{
 
 use bitflags::bitflags;
 use eyeball::Subscriber;
-use matrix_sdk_common::deserialized_responses::TimelineEventKind;
+use matrix_sdk_common::{deserialized_responses::TimelineEventKind, ROOM_VERSION_FALLBACK};
 use ruma::{
     api::client::sync::sync_events::v3::RoomSummary as RumaSummary,
     assign,
@@ -46,8 +46,8 @@ use ruma::{
     },
     room::RoomType,
     serde::Raw,
-    EventId, MxcUri, OwnedEventId, OwnedMxcUri, OwnedRoomAliasId, OwnedRoomId, OwnedUserId,
-    RoomAliasId, RoomId, RoomVersionId, UserId,
+    EventId, MilliSecondsSinceUnixEpoch, MxcUri, OwnedEventId, OwnedMxcUri, OwnedRoomAliasId,
+    OwnedRoomId, OwnedUserId, RoomAliasId, RoomId, RoomVersionId, UserId,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{debug, field::debug, info, instrument, warn};
@@ -310,7 +310,7 @@ impl BaseRoomInfo {
     }
 
     pub(super) fn handle_redaction(&mut self, redacts: &EventId) {
-        let room_version = self.room_version().unwrap_or(&RoomVersionId::V1).to_owned();
+        let room_version = self.room_version().unwrap_or(&ROOM_VERSION_FALLBACK).to_owned();
 
         // FIXME: Use let chains once available to get rid of unwrap()s
         if self.avatar.has_event_id(redacts) {
@@ -464,6 +464,14 @@ pub struct RoomInfo {
     /// more accurate than relying on the latest event.
     #[serde(default)]
     pub(crate) recency_stamp: Option<u64>,
+
+    /// A timestamp remembering when we observed the user accepting an invite on
+    /// this current device.
+    ///
+    /// This is useful to remember if the user accepted this a join on this
+    /// specific client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) invite_accepted_at: Option<MilliSecondsSinceUnixEpoch>,
 }
 
 impl RoomInfo {
@@ -486,6 +494,7 @@ impl RoomInfo {
             cached_display_name: None,
             cached_user_defined_notification_mode: None,
             recency_stamp: None,
+            invite_accepted_at: None,
         }
     }
 
@@ -643,9 +652,9 @@ impl RoomInfo {
         event: &SyncRoomRedactionEvent,
         _raw: &Raw<SyncRoomRedactionEvent>,
     ) {
-        let room_version = self.base_info.room_version().unwrap_or(&RoomVersionId::V1);
+        let room_version = self.room_version_or_default();
 
-        let Some(redacts) = event.redacts(room_version) else {
+        let Some(redacts) = event.redacts(&room_version) else {
             info!("Can't apply redaction, redacts field is missing");
             return;
         };
@@ -654,7 +663,7 @@ impl RoomInfo {
         if let Some(latest_event) = &mut self.latest_event {
             tracing::trace!("Checking if redaction applies to latest event");
             if latest_event.event_id().as_deref() == Some(redacts) {
-                match apply_redaction(latest_event.event().raw(), _raw, room_version) {
+                match apply_redaction(latest_event.event().raw(), _raw, &room_version) {
                     Some(redacted) => {
                         // Even if the original event was encrypted, redaction removes all its
                         // fields so it cannot possibly be successfully decrypted after redaction.
@@ -749,6 +758,22 @@ impl RoomInfo {
         self.summary.invited_member_count = count;
     }
 
+    /// Mark that the user has accepted an invite and remember when this has
+    /// happened using a timestamp set to [`MilliSecondsSinceUnixEpoch::now()`].
+    pub(crate) fn set_invite_accepted_now(&mut self) {
+        self.invite_accepted_at = Some(MilliSecondsSinceUnixEpoch::now());
+    }
+
+    /// Returns the timestamp when an invite to this room has been accepted by
+    /// this specific client.
+    ///
+    /// # Returns
+    /// - `Some` if the invite has been accepted by this specific client.
+    /// - `None` if the invite has not been accepted
+    pub fn invite_accepted_at(&self) -> Option<MilliSecondsSinceUnixEpoch> {
+        self.invite_accepted_at
+    }
+
     /// Updates the room heroes.
     pub(crate) fn update_heroes(&mut self, heroes: Vec<RoomHero>) {
         self.summary.room_heroes = heroes;
@@ -814,10 +839,10 @@ impl RoomInfo {
                 .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
             {
-                warn!("Unknown room version, falling back to v10");
+                warn!("Unknown room version, falling back to {ROOM_VERSION_FALLBACK}");
             }
 
-            RoomVersionId::V10
+            ROOM_VERSION_FALLBACK
         })
     }
 
@@ -867,13 +892,12 @@ impl RoomInfo {
         }
     }
 
-    /// Returns the join rule for this room.
-    ///
-    /// Defaults to `Public`, if missing.
-    pub fn join_rule(&self) -> &JoinRule {
+    /// Return the join rule for this room, if the `m.room.join_rules` event is
+    /// available.
+    pub fn join_rule(&self) -> Option<&JoinRule> {
         match &self.base_info.join_rules {
-            Some(MinimalStateEvent::Original(ev)) => &ev.content.join_rule,
-            _ => &JoinRule::Public,
+            Some(MinimalStateEvent::Original(ev)) => Some(&ev.content.join_rule),
+            _ => None,
         }
     }
 
@@ -1174,6 +1198,7 @@ mod tests {
         owned_mxc_uri, owned_user_id, room_id, serde::Raw,
     };
     use serde_json::json;
+    use similar_asserts::assert_eq;
 
     use super::{BaseRoomInfo, RoomInfo, SyncInfo};
     use crate::{
@@ -1222,6 +1247,7 @@ mod tests {
             cached_display_name: None,
             cached_user_defined_notification_mode: None,
             recency_stamp: Some(42),
+            invite_accepted_at: None,
         };
 
         let info_json = json!({
@@ -1275,7 +1301,7 @@ mod tests {
                 "num_mentions": 0,
                 "num_notifications": 0,
                 "latest_active": null,
-                "pending": []
+                "pending": [],
             },
             "recency_stamp": 42,
         });

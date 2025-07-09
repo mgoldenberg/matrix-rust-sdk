@@ -42,7 +42,10 @@ pub enum RoomListError {
     InvalidRoomId { error: String },
     #[error("Event cache ran into an error: {error}")]
     EventCache { error: String },
-    #[error("The requested room doesn't match the membership requirements {expected:?}, observed {actual:?}")]
+    #[error(
+        "The requested room doesn't match the membership requirements {expected:?}, \
+         observed {actual:?}"
+    )]
     IncorrectRoomMembership { expected: Vec<Membership>, actual: Membership },
 }
 
@@ -118,7 +121,7 @@ impl RoomListService {
         })))
     }
 
-    fn subscribe_to_rooms(&self, room_ids: Vec<String>) -> Result<(), RoomListError> {
+    async fn subscribe_to_rooms(&self, room_ids: Vec<String>) -> Result<(), RoomListError> {
         let room_ids = room_ids
             .into_iter()
             .map(|room_id| {
@@ -126,7 +129,9 @@ impl RoomListService {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        self.inner.subscribe_to_rooms(&room_ids.iter().map(AsRef::as_ref).collect::<Vec<_>>());
+        self.inner
+            .subscribe_to_rooms(&room_ids.iter().map(AsRef::as_ref).collect::<Vec<_>>())
+            .await;
 
         Ok(())
     }

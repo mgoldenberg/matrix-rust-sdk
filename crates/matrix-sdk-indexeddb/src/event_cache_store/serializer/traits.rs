@@ -50,13 +50,11 @@ pub trait Indexed: Sized {
 ///
 /// Each implementation represents a key on an [`Indexed`] type.
 pub trait IndexedKey<T: Indexed> {
+    /// The index name for the key, if it represents an index.
+    const INDEX: Option<&'static str> = None;
+
     /// Any extra data used to construct the key.
     type KeyComponents;
-
-    /// The index name for the key, if it represents an index.
-    fn index() -> Option<&'static str> {
-        None
-    }
 
     /// Encodes the key components into a type that can be used as a key in
     /// IndexedDB.
@@ -75,6 +73,22 @@ pub trait IndexedKey<T: Indexed> {
 /// A trait for constructing the bounds of an [`IndexedKey`].
 ///
 /// This is useful when constructing range queries in IndexedDB.
+///
+/// The [`IndexedKeyComponentBounds`] helps to specify the upper and lower
+/// bounds of the components that are used to create the final key, while the
+/// `IndexedKeyBounds` are the upper and lower bounds of the final key itself.
+///
+/// While these concepts are similar and often produce the same results, there
+/// are cases where these two concepts produce very different results. Namely,
+/// when any of the components are encrypted in the process of constructing the
+/// final key, then the component bounds and the key bounds produce very
+/// different results.
+///
+/// So, for instance, consider the `EventId`, which may be encrypted before
+/// being used in a final key. One cannot construct the upper and lower bounds
+/// of the final key using the upper and lower bounds of the `EventId`, because
+/// once the `EventId` is encrypted, the resultant value will no longer express
+/// the proper bound.
 pub trait IndexedKeyBounds<T: Indexed>: IndexedKey<T> {
     /// Constructs the lower bound of the key.
     fn lower_key(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self;
@@ -104,6 +118,9 @@ where
 /// This is useful when constructing range queries in IndexedDB. Note that this
 /// trait should not be implemented for key components that are going to be
 /// encrypted as ordering properties will not be preserved.
+///
+/// One may be interested to read the documentation of [`IndexedKeyBounds`] to
+/// get a better overview of how these two interact.
 pub trait IndexedKeyComponentBounds<T: Indexed>: IndexedKeyBounds<T> {
     /// Constructs the lower bound of the key components.
     fn lower_key_components() -> Self::KeyComponents;

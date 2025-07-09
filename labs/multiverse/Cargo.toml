@@ -1,7 +1,7 @@
 [package]
 name = "multiverse"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 publish = false
 license = "Apache-2.0"
 
@@ -18,6 +18,7 @@ color-eyre = "0.6.2"
 crossterm = "0.28.1"
 futures-util.workspace = true
 imbl.workspace = true
+indexmap.workspace = true
 itertools.workspace = true
 matrix-sdk = { path = "../../crates/matrix-sdk", features = ["sso-login"] }
 matrix-sdk-base = { path = "../../crates/matrix-sdk-base" }

@@ -13,15 +13,17 @@ use std::{
     env,
     process::exit,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
 use matrix_sdk::{
+    Client, Room, RoomState,
     config::SyncSettings,
     event_handler::Ctx,
     ruma::{
+        OwnedEventId,
         events::{
             macros::EventContent,
             room::{
@@ -29,12 +31,10 @@ use matrix_sdk::{
                 message::{MessageType, OriginalSyncRoomMessageEvent},
             },
         },
-        OwnedEventId,
     },
-    Client, Room, RoomState,
 };
 use serde::{Deserialize, Serialize};
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 // We use ruma to define our custom events. Just declare the events content
 // by deriving from `EventContent` and define `ruma_events` for the metadata
@@ -178,18 +178,13 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     // parse the command line for homeserver, username and password
-    let (homeserver_url, username, password) =
-        match (env::args().nth(1), env::args().nth(2), env::args().nth(3)) {
-            (Some(a), Some(b), Some(c)) => (a, b, c),
-            _ => {
-                eprintln!(
-                    "Usage: {} <homeserver_url> <username> <password>",
-                    env::args().next().unwrap()
-                );
-                // exist if missing
-                exit(1)
-            }
-        };
+    let (Some(homeserver_url), Some(username), Some(password)) =
+        (env::args().nth(1), env::args().nth(2), env::args().nth(3))
+    else {
+        eprintln!("Usage: {} <homeserver_url> <username> <password>", env::args().next().unwrap());
+        // exit if missing
+        exit(1)
+    };
 
     // our actual runner
     login_and_sync(homeserver_url, &username, &password).await?;

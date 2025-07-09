@@ -6,12 +6,12 @@ use std::{
 
 use anyhow::anyhow;
 use matrix_sdk::{
+    Client, Room, RoomState,
     config::SyncSettings,
     ruma::{
         api::client::session::get_login_types::v3::{IdentityProvider, LoginType},
         events::room::message::{MessageType, OriginalSyncRoomMessageEvent},
     },
-    Client, Room, RoomState,
 };
 use url::Url;
 
@@ -137,7 +137,7 @@ async fn offer_choices_and_login(client: &Client, choices: Vec<LoginChoice>) -> 
                 }
             }
             Err(_) => eprintln!("This is not a valid choice. Try again.\n"),
-        };
+        }
     };
 
     choices[choice].login(client).await?;

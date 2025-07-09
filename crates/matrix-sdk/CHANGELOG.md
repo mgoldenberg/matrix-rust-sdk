@@ -6,15 +6,50 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - ReleaseDate
 
-- Add logging to `Room::join`.
-  ([#5260](https://github.com/matrix-org/matrix-rust-sdk/pull/5260))
+### Bug fixes
+
+- When joining a room via `Client::join_room_by_id()`, if the client has `enable_share_history_on_invite` enabled,
+  we will correctly check for received room key bundles. Previously this was only done when calling `Room::join`.
+  ([#5043](https://github.com/matrix-org/matrix-rust-sdk/pull/5043))
+
+### Features
+
+- Add `Client::supported_versions()`, which returns the results of both `Client::server_versions()` and
+  `Client::unstable_features()` with a single call.
+  ([#5357](https://github.com/matrix-org/matrix-rust-sdk/pull/5357))
+- `WidgetDriver::send_to_device` Now supports sending encrypted to-device messages.
+  ([#5252](https://github.com/matrix-org/matrix-rust-sdk/pull/5252))
+- `Client::add_event_handler`: Set `Option<EncryptionInfo>` in `EventHandlerData` for to-device messages.
+  If the to-device message was encrypted, the `EncryptionInfo` will be set. If it is `None` the message was sent in clear.
+  ([#5099](https://github.com/matrix-org/matrix-rust-sdk/pull/5099))
+- `EventCache::subscribe_to_room_generic_updates` is added to subscribe to _all_
+  room updates without having to subscribe to all rooms individually
+  ([#5247](https://github.com/matrix-org/matrix-rust-sdk/pull/5247))
+- [**breaking**] The element call widget URL configuration struct uses the new `header` url parameter
+  instead of the now deprecated `hideHeader` parameter. This is only compatible with EC v0.13.0 or newer.
+- [**breaking**] `RoomEventCacheGenericUpdate` gains a new `Clear` variant, and sees
+  its `TimelineUpdated` variant being renamed to `UpdateTimeline`.
+  ([#5363](https://github.com/matrix-org/matrix-rust-sdk/pull/5363/))
+
+### Refactor
+
+- [**breaking**]: `Client::unstable_features()` returns a `BTreeSet<FeatureFlag>`, containing only
+  the features whose value was set to true in the response to the `/versions` endpoint.
+  ([#5357](https://github.com/matrix-org/matrix-rust-sdk/pull/5357))
 - `ClientServerCapabilities` has been renamed to `ClientServerInfo`. Alongside this,
   `Client::reset_server_info` is now `Client::reset_server_info` and `Client::fetch_server_capabilities`
   is now `Client::fetch_server_versions`, returning the server versions response directly.
   ([#5167](https://github.com/matrix-org/matrix-rust-sdk/pull/5167))
-- `Client::add_event_handler`: Set `Option<EncryptionInfo>` in `EventHandlerData` for to-device messages.
-  If the to-device message was encrypted, the `EncryptionInfo` will be set. If it is `None` the message was sent in clear.
-  ([#5099](https://github.com/matrix-org/matrix-rust-sdk/pull/5099))
+- `RoomEventCacheListener` is renamed `RoomEventCacheSubscriber`
+  ([#5269](https://github.com/matrix-org/matrix-rust-sdk/pull/5269))
+- `RoomPreview::join_rule` is now optional, and will be set to `None` if the join rule state event
+  is missing for a given room.
+  ([#5278](https://github.com/matrix-org/matrix-rust-sdk/pull/5278))
+
+### Bug fixes
+
+- `m.room.avatar` has been added as required state for sliding sync until [the existing backend issue](https://github.com/element-hq/synapse/issues/18598)
+causing deleted room avatars to not be flagged is fixed. ([#5293](https://github.com/matrix-org/matrix-rust-sdk/pull/5293))
 
 ## [0.12.0] - 2025-06-10
 
@@ -54,7 +89,7 @@ All notable changes to this project will be documented in this file.
 - `Room::send_single_receipt()` and `Room::send_multiple_receipts()` now also unset the unread
   flag of the room if an unthreaded read receipt is sent.
   ([#5055](https://github.com/matrix-org/matrix-rust-sdk/pull/5055))
-- `Client::is_user_ignored(&UserId)` can be used to check if a user is currently ignored. 
+- `Client::is_user_ignored(&UserId)` can be used to check if a user is currently ignored.
   ([#5081](https://github.com/matrix-org/matrix-rust-sdk/pull/5081))
 - `RoomSendQueue::send_gallery` has been added to allow sending MSC4274-style media galleries
   via the send queue under the `unstable-msc4274` feature.
@@ -65,12 +100,15 @@ All notable changes to this project will be documented in this file.
 - A invited DM room joined with `Client::join_room_by_id()` or `Client::join_room_by_id_or_alias()`
   will now be correctly marked as a DM.
   ([#5043](https://github.com/matrix-org/matrix-rust-sdk/pull/5043))
-- API responses with an HTTP status code `520` won't be retried anymore, as this is used by some proxies 
+- API responses with an HTTP status code `520` won't be retried anymore, as this is used by some proxies
   (including Cloudflare) to warn that an unknown error has happened in the actual server.
   ([#5105](https://github.com/matrix-org/matrix-rust-sdk/pull/5105))
 
 ### Refactor
 
+- Support for the deprecated `GET /auth_issuer` endpoint was removed in the `OAuth` API. Only the
+  `GET /auth_metadata` endpoint is used now.
+  ([#5302](https://github.com/matrix-org/matrix-rust-sdk/pull/5302))
 - `Room::push_context()` has been renamed into `Room::push_condition_room_ctx()`. The newer
   `Room::push_context` now returns a `matrix_sdk::Room::PushContext`, which can be used to compute
   the push actions for any event.

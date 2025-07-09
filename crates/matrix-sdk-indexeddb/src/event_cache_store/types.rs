@@ -95,18 +95,12 @@ impl Event {
         }
     }
 
-    pub fn take_content(self) -> TimelineEvent {
+    pub fn set_content(mut self, content: TimelineEvent) -> Self {
         match self {
-            Event::InBand(i) => i.content,
-            Event::OutOfBand(o) => o.content,
+            Event::InBand(ref mut i) => i.content = content,
+            Event::OutOfBand(ref mut o) => o.content = content,
         }
-    }
-
-    pub fn replace_content(&mut self, content: TimelineEvent) -> TimelineEvent {
-        match self {
-            Event::InBand(i) => std::mem::replace(&mut i.content, content),
-            Event::OutOfBand(o) => std::mem::replace(&mut o.content, content),
-        }
+        self
     }
 }
 

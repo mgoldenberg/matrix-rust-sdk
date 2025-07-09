@@ -21,8 +21,8 @@ use matrix_sdk::crypto::{DecryptionSettings, RoomEventDecryptionResult, TrustReq
 use matrix_sdk::{
     crypto::types::events::CryptoContextInfo,
     deserialized_responses::{EncryptionInfo, TimelineEvent},
-    event_cache::paginator::PaginableRoom,
-    room::{PushContext, Relations, RelationsOptions},
+    paginators::{thread::PaginableThread, PaginableRoom},
+    room::PushContext,
     AsyncTraitDeps, Result, Room, SendOutsideWasm,
 };
 use matrix_sdk_base::{latest_event::LatestEvent, RoomInfo};
@@ -87,7 +87,7 @@ impl RoomExt for Room {
 }
 
 pub(super) trait RoomDataProvider:
-    Clone + PaginableRoom + PinnedEventsRoom + 'static
+    Clone + PaginableRoom + PaginableThread + PinnedEventsRoom + 'static
 {
     fn own_user_id(&self) -> &UserId;
     fn room_version(&self) -> RoomVersionId;
@@ -113,6 +113,7 @@ pub(super) trait RoomDataProvider:
     fn load_event_receipts<'a>(
         &'a self,
         event_id: &'a EventId,
+        receipt_thread: ReceiptThread,
     ) -> impl Future<Output = IndexMap<OwnedUserId, Receipt>> + SendOutsideWasm + 'a;
 
     /// Load the current fully-read event id, from storage.
@@ -143,8 +144,6 @@ pub(super) trait RoomDataProvider:
         session_id: &str,
         sender: &UserId,
     ) -> impl Future<Output = Option<Arc<EncryptionInfo>>> + SendOutsideWasm;
-
-    async fn relations(&self, event_id: OwnedEventId, opts: RelationsOptions) -> Result<Relations>;
 
     /// Loads an event from the cache or network.
     fn load_event<'a>(
@@ -217,31 +216,36 @@ impl RoomDataProvider for Room {
     async fn load_event_receipts<'a>(
         &'a self,
         event_id: &'a EventId,
+        receipt_thread: ReceiptThread,
     ) -> IndexMap<OwnedUserId, Receipt> {
-        let mut unthreaded_receipts = match self
-            .load_event_receipts(ReceiptType::Read, ReceiptThread::Unthreaded, event_id)
+        let mut result = match self
+            .load_event_receipts(ReceiptType::Read, receipt_thread.clone(), event_id)
             .await
         {
             Ok(receipts) => receipts.into_iter().collect(),
             Err(e) => {
-                error!(?event_id, "Failed to get unthreaded read receipts for event: {e}");
+                error!(?event_id, ?receipt_thread, "Failed to get read receipts for event: {e}");
                 IndexMap::new()
             }
         };
 
-        let main_thread_receipts = match self
-            .load_event_receipts(ReceiptType::Read, ReceiptThread::Main, event_id)
-            .await
-        {
-            Ok(receipts) => receipts,
-            Err(e) => {
-                error!(?event_id, "Failed to get main thread read receipts for event: {e}");
-                Vec::new()
-            }
-        };
+        if receipt_thread == ReceiptThread::Unthreaded {
+            // Include the main thread receipts as well, to be maximally compatible with
+            // clients using either the unthreaded or main thread receipt type.
+            let main_thread_receipts = match self
+                .load_event_receipts(ReceiptType::Read, ReceiptThread::Main, event_id)
+                .await
+            {
+                Ok(receipts) => receipts,
+                Err(e) => {
+                    error!(?event_id, "Failed to get main thread read receipts for event: {e}");
+                    Vec::new()
+                }
+            };
+            result.extend(main_thread_receipts);
+        }
 
-        unthreaded_receipts.extend(main_thread_receipts);
-        unthreaded_receipts
+        result
     }
 
     async fn push_context(&self) -> Option<PushContext> {
@@ -295,10 +299,6 @@ impl RoomDataProvider for Room {
     ) -> Option<Arc<EncryptionInfo>> {
         // Pass directly on to `Room::get_encryption_info`
         self.get_encryption_info(session_id, sender).await
-    }
-
-    async fn relations(&self, event_id: OwnedEventId, opts: RelationsOptions) -> Result<Relations> {
-        self.relations(event_id, opts).await
     }
 
     async fn load_event<'a>(&'a self, event_id: &'a EventId) -> Result<TimelineEvent> {

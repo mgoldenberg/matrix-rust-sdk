@@ -31,11 +31,10 @@ use matrix_sdk::{
     attachment::AttachmentConfig,
     deserialized_responses::TimelineEvent,
     event_cache::{EventCacheDropHandles, RoomEventCache},
-    event_handler::EventHandlerHandle,
     executor::JoinHandle,
     room::{edit::EditedContent, reply::Reply, Receipts, Room},
     send_queue::{RoomSendQueueError, SendHandle},
-    Client, Result,
+    Result,
 };
 use mime::Mime;
 use pinned_events_loader::PinnedEventsRoom;
@@ -64,6 +63,7 @@ use tracing::{instrument, trace, warn};
 use self::{
     algorithms::rfind_event_by_id, controller::TimelineController, futures::SendAttachment,
 };
+use crate::timeline::controller::CryptoDropHandles;
 
 mod algorithms;
 mod builder;
@@ -78,9 +78,9 @@ mod item;
 mod pagination;
 mod pinned_events_loader;
 mod subscriber;
+mod tasks;
 #[cfg(test)]
 mod tests;
-mod threaded_events_loader;
 mod to_device;
 mod traits;
 mod virtual_item;
@@ -146,11 +146,7 @@ pub enum TimelineFocus {
     },
 
     /// Focus on a specific thread
-    Thread {
-        root_event_id: OwnedEventId,
-        /// Number of initial events to load on the first /relations request.
-        num_events: u16,
-    },
+    Thread { root_event_id: OwnedEventId },
 
     /// Only show pinned events.
     PinnedEvents { max_events_to_load: u16, max_concurrent_requests: u16 },
@@ -240,7 +236,7 @@ impl Timeline {
 
     /// Get the latest of the timeline's event items.
     pub async fn latest_event(&self) -> Option<EventTimelineItem> {
-        if self.controller.is_live().await {
+        if self.controller.is_live() {
             self.controller.items().await.last()?.as_event().cloned()
         } else {
             None
@@ -577,14 +573,18 @@ impl Timeline {
     /// If an unthreaded receipt is sent, this will also unset the unread flag
     /// of the room if necessary.
     ///
+    /// The thread of the receipt is determined by the timeline instance's
+    /// focus mode and `hide_threaded_events` flag.
+    ///
     /// Returns a boolean indicating if it sent the receipt or not.
     #[instrument(skip(self), fields(room_id = ?self.room().room_id()))]
     pub async fn send_single_receipt(
         &self,
         receipt_type: ReceiptType,
-        thread: ReceiptThread,
         event_id: OwnedEventId,
     ) -> Result<bool> {
+        let thread = self.controller.infer_thread_for_read_receipt(&receipt_type);
+
         if !self.controller.should_send_receipt(&receipt_type, &thread, &event_id).await {
             trace!(
                 "not sending receipt, because we already cover the event with a previous receipt"
@@ -675,12 +675,14 @@ impl Timeline {
     #[instrument(skip(self), fields(room_id = ?self.room().room_id()))]
     pub async fn mark_as_read(&self, receipt_type: ReceiptType) -> Result<bool> {
         if let Some(event_id) = self.controller.latest_event_id().await {
-            self.send_single_receipt(receipt_type, ReceiptThread::Unthreaded, event_id).await
+            self.send_single_receipt(receipt_type, event_id).await
         } else {
             trace!("can't mark room as read because there's no latest event id");
 
-            // Unset the read marker.
-            self.room().set_unread_flag(false).await?;
+            // For live timelines, unset the read marker in this case.
+            if self.controller.is_live() {
+                self.room().set_unread_flag(false).await?;
+            }
 
             Ok(false)
         }
@@ -771,34 +773,26 @@ impl Timeline {
 
 #[derive(Debug)]
 struct TimelineDropHandle {
-    client: Client,
-    event_handler_handles: Vec<EventHandlerHandle>,
     room_update_join_handle: JoinHandle<()>,
     pinned_events_join_handle: Option<JoinHandle<()>>,
-    room_key_from_backups_join_handle: JoinHandle<()>,
-    room_keys_received_join_handle: JoinHandle<()>,
-    room_key_backup_enabled_join_handle: JoinHandle<()>,
+    thread_update_join_handle: Option<JoinHandle<()>>,
     local_echo_listener_handle: JoinHandle<()>,
     _event_cache_drop_handle: Arc<EventCacheDropHandles>,
-    encryption_changes_handle: JoinHandle<()>,
+    _crypto_drop_handles: CryptoDropHandles,
 }
 
 impl Drop for TimelineDropHandle {
     fn drop(&mut self) {
-        for handle in self.event_handler_handles.drain(..) {
-            self.client.remove_event_handler(handle);
+        if let Some(handle) = self.pinned_events_join_handle.take() {
+            handle.abort();
         }
 
-        if let Some(handle) = self.pinned_events_join_handle.take() {
-            handle.abort()
-        };
+        if let Some(handle) = self.thread_update_join_handle.take() {
+            handle.abort();
+        }
 
         self.local_echo_listener_handle.abort();
         self.room_update_join_handle.abort();
-        self.room_key_from_backups_join_handle.abort();
-        self.room_key_backup_enabled_join_handle.abort();
-        self.room_keys_received_join_handle.abort();
-        self.encryption_changes_handle.abort();
     }
 }
 

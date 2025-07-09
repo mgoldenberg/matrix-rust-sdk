@@ -6,20 +6,20 @@ use imbl::Vector;
 use input::MessageOrCommand;
 use invited_room::InvitedRoomView;
 use matrix_sdk::{
+    Client, Room, RoomState,
     locks::Mutex,
     room::reply::{EnforceThread::Threaded, Reply},
     ruma::{
+        OwnedEventId, OwnedRoomId, RoomId, UserId,
         api::client::receipt::create_receipt::v3::ReceiptType,
         events::room::message::{
             ReplyWithinThread, RoomMessageEventContent, RoomMessageEventContentWithoutRelation,
         },
-        OwnedEventId, OwnedRoomId, RoomId, UserId,
     },
-    Client, Room, RoomState,
 };
 use matrix_sdk_ui::{
-    timeline::{TimelineBuilder, TimelineFocus, TimelineItem},
     Timeline,
+    timeline::{TimelineBuilder, TimelineFocus, TimelineItem},
 };
 use ratatui::{prelude::*, widgets::*};
 use tokio::{spawn, sync::OnceCell, task::JoinHandle};
@@ -28,8 +28,8 @@ use tracing::info;
 use self::{details::RoomDetails, input::Input, timeline::TimelineView};
 use super::status::StatusHandle;
 use crate::{
+    HEADER_BG, NORMAL_ROW_COLOR, TEXT_COLOR, Timelines,
     widgets::{recovery::ShouldExit, room_view::timeline::TimelineListState},
-    Timelines, HEADER_BG, NORMAL_ROW_COLOR, TEXT_COLOR,
 };
 
 mod details;
@@ -154,7 +154,8 @@ impl RoomView {
         let r = room.clone();
         let task = spawn(async move {
             let timeline = TimelineBuilder::new(&r)
-                .with_focus(TimelineFocus::Thread { root_event_id: root.clone(), num_events: 2 })
+                .with_focus(TimelineFocus::Thread { root_event_id: root.clone() })
+                .track_read_marker_and_receipts()
                 .build()
                 .await
                 .unwrap();
@@ -396,9 +397,9 @@ impl RoomView {
 
         let status_handle = self.status_handle.clone();
 
-        // Request to back-paginate 20 events.
+        // Request to back-paginate 5 events.
         *pagination = Some(spawn(async move {
-            if let Err(err) = sdk_timeline.paginate_backwards(20).await {
+            if let Err(err) = sdk_timeline.paginate_backwards(5).await {
                 status_handle.set_message(format!("Error during backpagination: {err}"));
             }
         }));
@@ -587,7 +588,9 @@ impl RoomView {
     fn update(&mut self) {
         match &mut self.mode {
             Mode::Normal { invited_room_view } => {
-                if invited_room_view.as_ref().is_some_and(|view| view.should_switch()) {
+                if let Some(view) = invited_room_view
+                    && view.should_switch()
+                {
                     self.mode = Mode::Normal { invited_room_view: None };
                 }
             }
@@ -670,15 +673,15 @@ impl Widget for &mut RoomView {
                 }
             };
 
-            if let Some(timeline_area) = timeline_area {
-                if let Some(items) = self.get_selected_timeline_items() {
-                    let is_thread = matches!(self.kind, TimelineKind::Thread { .. });
-                    let mut timeline = TimelineView::new(&items, is_thread);
-                    timeline.render(timeline_area, buf, &mut self.timeline_list);
-                }
+            if let Some(timeline_area) = timeline_area
+                && let Some(items) = self.get_selected_timeline_items()
+            {
+                let is_thread = matches!(self.kind, TimelineKind::Thread { .. });
+                let mut timeline = TimelineView::new(&items, is_thread);
+                timeline.render(timeline_area, buf, &mut self.timeline_list);
             }
         } else {
             render_paragraph(buf, "Nothing to see here...".to_owned())
-        };
+        }
     }
 }

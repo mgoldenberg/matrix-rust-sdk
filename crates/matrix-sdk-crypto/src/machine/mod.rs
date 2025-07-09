@@ -266,9 +266,6 @@ impl OlmMachine {
 
     /// Create a new OlmMachine with the given [`CryptoStore`].
     ///
-    /// The created machine will keep the encryption keys only in memory and
-    /// once the object is dropped the keys will be lost.
-    ///
     /// If the store already contains encryption keys for the given user/device
     /// pair those will be re-used. Otherwise new ones will be created and
     /// stored.
@@ -618,7 +615,7 @@ impl OlmMachine {
             AnyIncomingResponse::KeysBackup(_) => {
                 Box::pin(self.inner.backup_machine.mark_request_as_sent(request_id)).await?;
             }
-        };
+        }
 
         Ok(())
     }
@@ -843,10 +840,16 @@ impl OlmMachine {
         }
     }
 
-    /// Decrypt a to-device event.
+    /// Decrypt and handle a to-device event.
     ///
-    /// Returns a decrypted `ToDeviceEvent` if the decryption was successful,
-    /// an error indicating why decryption failed otherwise.
+    /// If decryption (or checking the sender device) fails, returns
+    /// `Err(DecryptToDeviceError::OlmError)`.
+    ///
+    /// If the sender device is dehydrated, does no handling and immediately
+    /// returns `Err(DecryptToDeviceError::FromDehydratedDevice)`.
+    ///
+    /// Otherwise, handles the decrypted event and returns it (decrypted) as
+    /// `Ok(OlmDecryptionInfo)`.
     ///
     /// # Arguments
     ///
@@ -856,20 +859,32 @@ impl OlmMachine {
         transaction: &mut StoreTransaction,
         event: &EncryptedToDeviceEvent,
         changes: &mut Changes,
-    ) -> OlmResult<OlmDecryptionInfo> {
+    ) -> Result<OlmDecryptionInfo, DecryptToDeviceError> {
+        // Decrypt the event
         let mut decrypted =
             transaction.account().await?.decrypt_to_device_event(&self.inner.store, event).await?;
 
-        // We ignore all to-device events from dehydrated devices - we should not
-        // receive any
-        if !self.to_device_event_is_from_dehydrated_device(&decrypted, &event.sender).await? {
-            // Handle the decrypted event, e.g. fetch out Megolm sessions out of
-            // the event.
+        let from_dehydrated_device =
+            self.to_device_event_is_from_dehydrated_device(&decrypted, &event.sender).await?;
+
+        // Check whether this event is from a dehydrated device - if so, return Ok(None)
+        // to skip it because we don't expect ever to receive an event from a
+        // dehydrated device.
+        if from_dehydrated_device {
+            // Device is dehydrated: ignore this event
+            warn!(
+                sender = ?event.sender,
+                session = ?decrypted.session,
+                "Received a to-device event from a dehydrated device. This is unexpected: ignoring event"
+            );
+            Err(DecryptToDeviceError::FromDehydratedDevice)
+        } else {
+            // Device is not dehydrated: handle it as normal e.g. create a Megolm session
             self.handle_decrypted_to_device_event(transaction.cache(), &mut decrypted, changes)
                 .await?;
-        }
 
-        Ok(decrypted)
+            Ok(decrypted)
+        }
     }
 
     #[instrument(
@@ -1310,10 +1325,16 @@ impl OlmMachine {
         self.inner.verification_machine.get_requests(user_id)
     }
 
+    /// Given a to-device event that has either been decrypted or arrived in
+    /// plaintext, handle it.
+    ///
+    /// Here, we only process events that are allowed to arrive in plaintext.
     async fn handle_to_device_event(&self, changes: &mut Changes, event: &ToDeviceEvents) {
         use crate::types::events::ToDeviceEvents::*;
 
         match event {
+            // These are handled here because we accept them either plaintext or
+            // encrypted
             RoomKeyRequest(e) => self.inner.key_request_machine.receive_incoming_key_request(e),
             SecretRequest(e) => self.inner.key_request_machine.receive_incoming_secret_request(e),
             RoomKeyWithheld(e) => self.add_withheld_info(changes, e),
@@ -1327,8 +1348,16 @@ impl OlmMachine {
             | KeyVerificationStart(..) => {
                 self.handle_verification_event(event).await;
             }
-            Dummy(_) | RoomKey(_) | ForwardedRoomKey(_) | RoomEncrypted(_) => {}
-            _ => {}
+
+            // We don't process custom or dummy events at all
+            Custom(_) | Dummy(_) => {}
+
+            // Encrypted events are handled elsewhere
+            RoomEncrypted(_) => {}
+
+            // These are handled in `handle_decrypted_to_device_event` because we
+            // only accept them if they arrive encrypted.
+            SecretSend(_) | RoomKey(_) | ForwardedRoomKey(_) => {}
         }
     }
 
@@ -1409,8 +1438,8 @@ impl OlmMachine {
         e: ToDeviceEvent<ToDeviceEncryptedEventContent>,
     ) -> Option<ProcessedToDeviceEvent> {
         let decrypted = match self.decrypt_to_device_event(transaction, &e, changes).await {
-            Ok(e) => e,
-            Err(err) => {
+            Ok(decrypted) => decrypted,
+            Err(DecryptToDeviceError::OlmError(err)) => {
                 if let OlmError::SessionWedged(sender, curve_key) = err {
                     if let Err(e) =
                         self.inner.session_manager.mark_device_as_wedged(&sender, curve_key).await
@@ -1424,27 +1453,8 @@ impl OlmMachine {
 
                 return Some(ProcessedToDeviceEvent::UnableToDecrypt(raw_event));
             }
+            Err(DecryptToDeviceError::FromDehydratedDevice) => return None,
         };
-
-        // We ignore all to-device events from dehydrated devices - we should not
-        // receive any
-        match self.to_device_event_is_from_dehydrated_device(&decrypted, &e.sender).await {
-            Ok(true) => {
-                warn!(
-                    sender = ?e.sender,
-                    session = ?decrypted.session,
-                    "Received a to-device event from a dehydrated device. This is unexpected: ignoring event"
-                );
-                return None;
-            }
-            Ok(false) => {}
-            Err(err) => {
-                error!(
-                    error = ?err,
-                    "Couldn't check whether the event is from a dehydrated device",
-                );
-            }
-        }
 
         // New sessions modify the account so we need to save that
         // one as well.
@@ -1602,11 +1612,11 @@ impl OlmMachine {
         }
 
         for raw_event in sync_changes.to_device_events {
-            let raw_event =
+            let processed_event =
                 Box::pin(self.receive_to_device_event(transaction, &mut changes, raw_event)).await;
 
-            if let Some(raw_event) = raw_event {
-                events.push(raw_event);
+            if let Some(processed_event) = processed_event {
+                events.push(processed_event);
             }
         }
 
@@ -2919,6 +2929,38 @@ fn megolm_error_to_utd_info(
     });
 
     Ok(UnableToDecryptInfo { session_id, reason })
+}
+
+/// An error that can occur during [`OlmMachine::decrypt_to_device_event`] -
+/// either because decryption failed, or because the sender device was a
+/// dehydrated device, which should never send any to-device messages.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum DecryptToDeviceError {
+    #[error("An Olm error occurred meaning we failed to decrypt the event")]
+    OlmError(#[from] OlmError),
+
+    #[error("The event was sent from a dehydrated device")]
+    FromDehydratedDevice,
+}
+
+impl From<CryptoStoreError> for DecryptToDeviceError {
+    fn from(value: CryptoStoreError) -> Self {
+        Self::OlmError(value.into())
+    }
+}
+
+#[cfg(test)]
+impl From<DecryptToDeviceError> for OlmError {
+    /// Unwrap the `OlmError` inside this error, or panic if this does not
+    /// contain an `OlmError`.
+    fn from(value: DecryptToDeviceError) -> Self {
+        match value {
+            DecryptToDeviceError::OlmError(olm_error) => olm_error,
+            DecryptToDeviceError::FromDehydratedDevice => {
+                panic!("Expected an OlmError but found FromDehydratedDevice")
+            }
+        }
+    }
 }
 
 #[cfg(test)]

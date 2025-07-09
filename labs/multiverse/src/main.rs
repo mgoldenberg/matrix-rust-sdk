@@ -2,7 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    io::{self, stdout, Write},
+    io::{self, Write, stdout},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -16,23 +16,23 @@ use crossterm::{
     },
     execute,
 };
-use futures_util::{pin_mut, StreamExt as _};
+use futures_util::{StreamExt as _, pin_mut};
 use imbl::Vector;
 use layout::Flex;
 use matrix_sdk::{
+    AuthSession, Client, SqliteCryptoStore, SqliteEventCacheStore, SqliteStateStore,
     authentication::matrix::MatrixSession,
     config::StoreConfig,
     encryption::{BackupDownloadStrategy, EncryptionSettings},
     reqwest::Url,
     ruma::OwnedRoomId,
-    AuthSession, Client, SqliteCryptoStore, SqliteEventCacheStore, SqliteStateStore,
 };
 use matrix_sdk_common::locks::Mutex;
 use matrix_sdk_ui::{
+    Timeline as SdkTimeline,
     room_list_service::{self, filters::new_filter_non_left},
     sync_service::SyncService,
     timeline::{RoomExt as _, TimelineFocus, TimelineItem},
-    Timeline as SdkTimeline,
 };
 use ratatui::{prelude::*, style::palette::tailwind, widgets::*};
 use throbber_widgets_tui::{Throbber, ThrobberState};
@@ -325,7 +325,7 @@ impl App {
                 modifiers: KeyModifiers::CONTROL,
                 ..
             }) => {
-                self.room_list.next_room();
+                self.room_list.next_room().await;
                 let room_id = self.room_list.get_selected_room_id();
                 self.room_view.set_selected_room(room_id);
             }
@@ -333,7 +333,7 @@ impl App {
             Event::Key(KeyEvent {
                 code: Char('k') | Up, modifiers: KeyModifiers::CONTROL, ..
             }) => {
-                self.room_list.previous_room();
+                self.room_list.previous_room().await;
                 let room_id = self.room_list.get_selected_room_id();
                 self.room_view.set_selected_room(room_id);
             }
@@ -397,18 +397,18 @@ impl App {
                         }
                     }
                     GlobalMode::Help => {
-                        if let Event::Key(key) = event {
-                            if let (KeyModifiers::NONE, Char('q') | Esc) = (key.modifiers, key.code)
-                            {
-                                self.set_global_mode(GlobalMode::Default)
-                            }
+                        if let Event::Key(key) = event
+                            && let KeyModifiers::NONE = key.modifiers
+                            && let Char('q') | Esc = key.code
+                        {
+                            self.set_global_mode(GlobalMode::Default)
                         }
                     }
                     GlobalMode::Settings { view } => {
-                        if let Event::Key(key) = event {
-                            if view.handle_key_press(key).await {
-                                self.set_global_mode(GlobalMode::Default);
-                            }
+                        if let Event::Key(key) = event
+                            && view.handle_key_press(key).await
+                        {
+                            self.set_global_mode(GlobalMode::Default);
                         }
                     }
                     GlobalMode::Exiting { .. } => {}

@@ -20,7 +20,7 @@ use matrix_sdk::{
         api::client::{
             discovery::{
                 discover_homeserver::RtcFocusInfo,
-                get_authorization_server_metadata::msc2965::Prompt as RumaOidcPrompt,
+                get_authorization_server_metadata::v1::Prompt as RumaOidcPrompt,
             },
             push::{EmailPusherData, PusherIds, PusherInit, PusherKind as RumaPusherKind},
             room::{create_room, Visibility},
@@ -86,7 +86,10 @@ use tokio::sync::broadcast::error::RecvError;
 use tracing::{debug, error};
 use url::Url;
 
-use super::{room::Room, session_verification::SessionVerificationController};
+use super::{
+    room::{room_info::RoomInfo, Room},
+    session_verification::SessionVerificationController,
+};
 use crate::{
     authentication::{HomeserverLoginDetails, OidcConfiguration, OidcError, SsoError, SsoHandler},
     client,
@@ -95,7 +98,6 @@ use crate::{
     notification_settings::NotificationSettings,
     room::{RoomHistoryVisibility, RoomInfoListener},
     room_directory_search::RoomDirectorySearch,
-    room_info::RoomInfo,
     room_preview::RoomPreview,
     ruma::{
         AccountDataEvent, AccountDataEventType, AuthData, InviteAvatars, MediaPreviewConfig,
@@ -1428,9 +1430,16 @@ impl Client {
     /// Clear all the non-critical caches for this Client instance.
     ///
     /// WARNING: This will clear all the caches, including the base store (state
-    /// store), so callers must make sure that any sync is inactive before
-    /// calling this method. In particular, the `SyncService` must not be
-    /// running. After the method returns, the Client will be in an unstable
+    /// store), so callers must make sure that the Client is at rest before
+    /// calling it.
+    ///
+    /// In particular, if a [`SyncService`] is running, it must be passed here
+    /// as a parameter, or stopped before calling this method. Ideally, the
+    /// send queues should have been disabled and must all be inactive (i.e.
+    /// not sending events); this method will disable them, but it might not
+    /// be enough if the queues are still processing events.
+    ///
+    /// After the method returns, the Client will be in an unstable
     /// state, and it is required that the caller reinstantiates a new
     /// Client instance, be it via dropping the previous and re-creating it,
     /// restarting their application, or any other similar means.
@@ -1440,8 +1449,23 @@ impl Client {
     ///   will start as if they were empty.
     /// - This will empty the media cache according to the current media
     ///   retention policy.
-    pub async fn clear_caches(&self) -> Result<(), ClientError> {
+    pub async fn clear_caches(
+        &self,
+        sync_service: Option<Arc<SyncService>>,
+    ) -> Result<(), ClientError> {
         let closure = async || -> Result<_, ClientError> {
+            // First, make sure to expire sessions in the sync service.
+            if let Some(sync_service) = sync_service {
+                sync_service.inner.expire_sessions().await;
+            }
+
+            // Disable the send queues, as they might read and write to the state store.
+            // Events being send might still be active, and cause errors if
+            // processing finishes, so this will only minimize damage. Since
+            // this method should only be called in exceptional cases, this has
+            // been deemed acceptable.
+            self.inner.send_queue().set_enabled(false).await;
+
             // Clean up the media cache according to the current media retention policy.
             self.inner
                 .event_cache_store()

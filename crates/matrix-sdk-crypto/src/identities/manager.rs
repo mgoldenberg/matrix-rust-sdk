@@ -596,7 +596,9 @@ impl IdentityManager {
                 {
                     Some((master_key, self_signing))
                 } else {
-                    warn!("A user identity didn't contain a self signing pubkey or the key was invalid");
+                    warn!(
+                        "A user identity didn't contain a self signing pubkey or the key was invalid"
+                    );
                     None
                 }
             }
@@ -722,7 +724,7 @@ impl IdentityManager {
                     warn!(error = ?e, "Couldn't create new user identity");
                 }
             }
-        };
+        }
 
         Ok(())
     }
@@ -1143,7 +1145,7 @@ impl IdentityManager {
                     "cannot update existing InboundGroupSession due to ownership error: {e}",
                 );
             }
-        };
+        }
 
         Ok(())
     }

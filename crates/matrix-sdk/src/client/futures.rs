@@ -119,7 +119,10 @@ where
                                 )) if *error_response.error()
                                     == BasicErrorResponseType::InvalidGrant =>
                                 {
-                                    error!("Token refresh: OAuth 2.0 refresh_token rejected with invalid grant");
+                                    error!(
+                                        "Token refresh: OAuth 2.0 refresh_token rejected \
+                                         with invalid grant"
+                                    );
                                     // The refresh was denied, signal to sign out the user.
                                     client.broadcast_unknown_token(soft_logout);
                                 }
@@ -130,7 +133,7 @@ where
                                     // The refresh failed for other reasons, no
                                     // need to sign out.
                                 }
-                            };
+                            }
                             return Err(HttpError::RefreshToken(refresh_error));
                         }
 

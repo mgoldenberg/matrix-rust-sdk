@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
-pub mod traits;
-pub mod types;
-
 use gloo_utils::format::JsValueSerdeExt;
+use matrix_sdk_crypto::CryptoStoreError;
 use ruma::RoomId;
 use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
@@ -29,6 +27,9 @@ use crate::{
     },
     serializer::{IndexeddbSerializer, IndexeddbSerializerError},
 };
+
+pub mod traits;
+pub mod types;
 
 #[derive(Debug, Error)]
 pub enum IndexeddbEventCacheStoreSerializerError<IndexingError> {
@@ -61,6 +62,7 @@ impl IndexeddbEventCacheStoreSerializer {
         Self { inner }
     }
 
+    /// Returns a reference to the inner [`IndexeddbSerializer`].
     pub fn inner(&self) -> &IndexeddbSerializer {
         &self.inner
     }
@@ -95,6 +97,49 @@ impl IndexeddbEventCacheStoreSerializer {
         K::encode(room_id, components, &self.inner)
     }
 
+    /// Encodes a key for a [`Indexed`] type as a [`JsValue`].
+    ///
+    /// Note that the particular key which is encoded is defined by the type
+    /// `K`.
+    pub fn encode_key_as_value<T, K>(
+        &self,
+        room_id: &RoomId,
+        components: &K::KeyComponents,
+    ) -> Result<JsValue, serde_wasm_bindgen::Error>
+    where
+        T: Indexed,
+        K: IndexedKey<T> + Serialize,
+    {
+        serde_wasm_bindgen::to_value(&self.encode_key::<T, K>(room_id, components))
+    }
+
+    /// Encodes a key component range for an [`Indexed`] type.
+    ///
+    /// Note that the particular key which is encoded is defined by the type
+    /// `K`.
+    pub fn encode_key_range<T, K>(
+        &self,
+        room_id: &RoomId,
+        range: impl Into<IndexedKeyRange<K>>,
+    ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error>
+    where
+        T: Indexed,
+        K: IndexedKeyBounds<T> + Serialize,
+    {
+        use serde_wasm_bindgen::to_value;
+        Ok(match range.into() {
+            IndexedKeyRange::Only(key) => IdbKeyRange::only(&to_value(&key)?)?,
+            IndexedKeyRange::Bound(lower, upper) => {
+                IdbKeyRange::bound(&to_value(&lower)?, &to_value(&upper)?)?
+            }
+            IndexedKeyRange::All => {
+                let lower = to_value(&K::lower_key(room_id, &self.inner))?;
+                let upper = to_value(&K::upper_key(room_id, &self.inner))?;
+                IdbKeyRange::bound(&lower, &upper).expect("construct key range")
+            }
+        })
+    }
+
     /// Encodes a key component range for an [`Indexed`] type.
     ///
     /// Note that the particular key which is encoded is defined by the type
@@ -127,33 +172,6 @@ impl IndexeddbEventCacheStoreSerializer {
         self.encode_key_range::<T, K>(room_id, range)
     }
 
-    /// Encodes a key component range for an [`Indexed`] type.
-    ///
-    /// Note that the particular key which is encoded is defined by the type
-    /// `K`.
-    pub fn encode_key_range<T, K>(
-        &self,
-        room_id: &RoomId,
-        range: impl Into<IndexedKeyRange<K>>,
-    ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error>
-    where
-        T: Indexed,
-        K: IndexedKeyBounds<T> + Serialize,
-    {
-        use serde_wasm_bindgen::to_value;
-        Ok(match range.into() {
-            IndexedKeyRange::Only(key) => IdbKeyRange::only(&to_value(&key)?)?,
-            IndexedKeyRange::Bound(lower, upper) => {
-                IdbKeyRange::bound(&to_value(&lower)?, &to_value(&upper)?)?
-            }
-            IndexedKeyRange::All => {
-                let lower = to_value(&K::lower_key(room_id, &self.inner))?;
-                let upper = to_value(&K::upper_key(room_id, &self.inner))?;
-                IdbKeyRange::bound(&lower, &upper).expect("construct key range")
-            }
-        })
-    }
-
     /// Serializes an [`Indexed`] type into a [`JsValue`]
     pub fn serialize<T>(
         &self,
@@ -170,6 +188,7 @@ impl IndexeddbEventCacheStoreSerializer {
         serde_wasm_bindgen::to_value(&indexed).map_err(Into::into)
     }
 
+    /// Deserializes an [`Indexed`] type from a [`JsValue`]
     pub fn deserialize<T>(
         &self,
         value: JsValue,

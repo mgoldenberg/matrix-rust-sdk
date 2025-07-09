@@ -51,7 +51,6 @@ use ruma::{
                 UnstablePollStartContentBlock,
             },
         },
-        receipt::ReceiptThread,
         room::message::{
             LocationMessageEventContent, MessageType, ReplyWithinThread,
             RoomMessageEventContentWithoutRelation,
@@ -351,9 +350,7 @@ impl Timeline {
         event_id: String,
     ) -> Result<(), ClientError> {
         let event_id = EventId::parse(event_id)?;
-        self.inner
-            .send_single_receipt(receipt_type.into(), ReceiptThread::Unthreaded, event_id)
-            .await?;
+        self.inner.send_single_receipt(receipt_type.into(), event_id).await?;
         Ok(())
     }
 
@@ -564,7 +561,10 @@ impl Timeline {
                 let event_id = match event_or_transaction_id {
                     EventOrTransactionId::EventId { event_id } => EventId::parse(event_id)?,
                     EventOrTransactionId::TransactionId { .. } => {
-                        warn!("trying to apply an edit to a local echo that doesn't exist in this timeline, aborting");
+                        warn!(
+                            "trying to apply an edit to a local echo that doesn't exist \
+                             in this timeline, aborting"
+                        );
                         return Ok(());
                     }
                 };
@@ -701,6 +701,8 @@ impl Timeline {
                     content: replied_to.content.clone().into(),
                     sender: replied_to.sender.to_string(),
                     sender_profile: replied_to.sender_profile.into(),
+                    timestamp: replied_to.timestamp.into(),
+                    event_or_transaction_id: replied_to.identifier.into(),
                 },
             ))),
 
@@ -1568,7 +1570,10 @@ mod galleries {
                         return Ok(());
                     }
                     error!("task panicked! resuming panic from here.");
+                    #[cfg(not(target_family = "wasm"))]
                     panic::resume_unwind(err.into_panic());
+                    #[cfg(target_family = "wasm")]
+                    panic!("task panicked! {err}");
                 }
             }
         }

@@ -8,9 +8,14 @@ All notable changes to this project will be documented in this file.
 
 ### Features
 
+- Add support for received room key bundle data, as required by encrypted history sharing ((MSC4268)[https://github.com/matrix-org/matrix-spec-proposals/pull/4268)). ([#5276](https://github.com/matrix-org/matrix-rust-sdk/pull/5276))
 - Add `IndexeddbEventCacheStore` for providing an IndexedDB implementation
   of the `EventCacheStore`. Expose the type through `IndexeddbEventCacheStoreBuilder`
   which ensures object stores in IndexedDB are properly initialized.
+
+## [0.12.0] - 2025-06-10
+
+No notable changes in this release.
 
 ## [0.11.0] - 2025-04-11
 
@@ -35,6 +40,7 @@ No notable changes in this release.
 
 - `save_change` performance improvement, all encryption and serialization
   is done now outside of the db transaction.
+
 ### Bug Fixes
 
 - Use the `DisplayName` struct to protect against homoglyph attacks.

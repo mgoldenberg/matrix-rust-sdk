@@ -4,16 +4,11 @@ use matrix_sdk_base::store::RoomLoadSettings;
 use matrix_sdk_test::async_test;
 use oauth2::{ClientId, CsrfToken, PkceCodeChallenge, RedirectUrl};
 use ruma::{
-    api::client::discovery::get_authorization_server_metadata::msc2965::Prompt, device_id,
+    api::client::discovery::get_authorization_server_metadata::v1::Prompt, device_id,
     owned_device_id, user_id, DeviceId, ServerName,
 };
-use serde_json::json;
 use tokio::sync::broadcast::error::TryRecvError;
 use url::Url;
-use wiremock::{
-    matchers::{method, path},
-    Mock, ResponseTemplate,
-};
 
 use super::{
     AuthorizationCode, AuthorizationError, AuthorizationResponse, OAuth, OAuthAuthorizationData,
@@ -30,7 +25,7 @@ use crate::{
             oauth::{mock_client_id, mock_client_metadata, mock_redirect_uri, mock_session},
             MockClientBuilder,
         },
-        mocks::{oauth::MockServerMetadataBuilder, MatrixMockServer},
+        mocks::MatrixMockServer,
     },
     Client, Error, SessionChange,
 };
@@ -179,8 +174,7 @@ async fn test_high_level_login_cancellation() -> anyhow::Result<()> {
 
     assert_eq!(oauth.client_id().map(|id| id.as_str()), Some("test_client_id"));
 
-    check_authorization_url(&authorization_data, &oauth, &server.server().uri(), None, None, None)
-        .await;
+    check_authorization_url(&authorization_data, &oauth, &server.uri(), None, None, None).await;
 
     // When completing login with a cancellation callback.
     redirect_uri.set_query(Some(&format!(
@@ -211,8 +205,7 @@ async fn test_high_level_login_invalid_state() -> anyhow::Result<()> {
 
     assert_eq!(oauth.client_id().map(|id| id.as_str()), Some("test_client_id"));
 
-    check_authorization_url(&authorization_data, &oauth, &server.server().uri(), None, None, None)
-        .await;
+    check_authorization_url(&authorization_data, &oauth, &server.uri(), None, None, None).await;
 
     // When completing login with an old/tampered state.
     redirect_uri.set_query(Some("code=42&state=imposter_alert"));
@@ -233,7 +226,7 @@ async fn test_high_level_login_invalid_state() -> anyhow::Result<()> {
 #[async_test]
 async fn test_login_url() -> anyhow::Result<()> {
     let server = MatrixMockServer::new().await;
-    let server_uri = server.server().uri();
+    let server_uri = server.uri();
 
     let oauth_server = server.oauth();
     oauth_server.mock_server_metadata().ok().expect(3).mount().await;
@@ -488,7 +481,7 @@ async fn test_finish_login() -> anyhow::Result<()> {
 
 #[async_test]
 async fn test_oauth_session() -> anyhow::Result<()> {
-    let client = MockClientBuilder::new("https://example.org".to_owned()).unlogged().build().await;
+    let client = MockClientBuilder::new(None).unlogged().build().await;
     let oauth = client.oauth();
 
     let tokens = mock_session_tokens_with_refresh();
@@ -514,7 +507,7 @@ async fn test_oauth_session() -> anyhow::Result<()> {
 #[async_test]
 async fn test_insecure_clients() -> anyhow::Result<()> {
     let server = MatrixMockServer::new().await;
-    let server_url = server.server().uri();
+    let server_url = server.uri();
 
     server.mock_well_known().ok().expect(1..).named("well_known").mount().await;
     server.mock_versions().ok().expect(1..).named("versions").mount().await;
@@ -648,29 +641,10 @@ async fn test_server_metadata() {
     let server = MatrixMockServer::new().await;
     let client = server.client_builder().unlogged().build().await;
     let oauth = client.oauth();
-    let issuer = server.server().uri();
 
     // The endpoint is not mocked so it is not supported.
     let error = oauth.server_metadata().await.unwrap_err();
     assert!(error.is_not_supported());
-
-    // Mock the `GET /auth_issuer` fallback endpoint.
-    Mock::given(method("GET"))
-        .and(path("/_matrix/client/unstable/org.matrix.msc2965/auth_issuer"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"issuer": issuer})))
-        .expect(1)
-        .named("auth_issuer")
-        .mount(server.server())
-        .await;
-    let metadata = MockServerMetadataBuilder::new(&issuer).build();
-    Mock::given(method("GET"))
-        .and(path("/.well-known/openid-configuration"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(metadata))
-        .expect(1)
-        .named("openid-configuration")
-        .mount(server.server())
-        .await;
-    oauth.server_metadata().await.unwrap();
 
     // Mock the `GET /auth_metadata` endpoint.
     let oauth_server = server.oauth();

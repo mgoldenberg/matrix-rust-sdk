@@ -33,10 +33,7 @@ pub use identity_status_changes::IdentityStatusChanges;
 #[cfg(feature = "e2e-encryption")]
 use matrix_sdk_base::crypto::{IdentityStatusChange, RoomIdentityProvider, UserIdentity};
 #[cfg(feature = "e2e-encryption")]
-use matrix_sdk_base::{
-    crypto::{DecryptionSettings, RoomEventDecryptionResult},
-    deserialized_responses::EncryptionInfo,
-};
+use matrix_sdk_base::{crypto::RoomEventDecryptionResult, deserialized_responses::EncryptionInfo};
 use matrix_sdk_base::{
     deserialized_responses::{
         RawAnySyncOrStrippedState, RawSyncOrStrippedState, SyncOrStrippedState,
@@ -176,7 +173,7 @@ pub mod reply;
 pub mod privacy_settings;
 
 #[cfg(feature = "e2e-encryption")]
-mod shared_room_history;
+pub(crate) mod shared_room_history;
 
 /// A struct containing methods that are common for Joined, Invited and Left
 /// Rooms
@@ -375,7 +372,6 @@ impl Room {
     ///
     /// Only invited and left rooms can be joined via this method.
     #[doc(alias = "accept_invitation")]
-    #[instrument(skip_all, fields(room_id = ?self.inner.room_id()))]
     pub async fn join(&self) -> Result<()> {
         let prev_room_state = self.inner.state();
 
@@ -386,39 +382,7 @@ impl Room {
             ))));
         }
 
-        let inviter = if prev_room_state == RoomState::Invited {
-            match self.invite_details().await {
-                Ok(details) => details.inviter,
-                Err(e) => {
-                    warn!("No invite details were found, can't attempt to find a room key bundle to accept: {e:?}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        #[cfg(feature = "e2e-encryption")]
-        let enable_share_history_on_invite = self.client.inner.enable_share_history_on_invite;
-
-        #[cfg(not(feature = "e2e-encryption"))]
-        let enable_share_history_on_invite = false;
-
-        debug!(
-            ?prev_room_state,
-            inviter=?inviter.as_ref().map(|room_member| room_member.user_id()),
-            enable_share_history_on_invite,
-            "Joining room",
-        );
-
         self.client.join_room_by_id(self.room_id()).await?;
-
-        #[cfg(feature = "e2e-encryption")]
-        if enable_share_history_on_invite {
-            if let Some(inviter) = inviter {
-                shared_room_history::maybe_accept_key_bundle(self, inviter.user_id()).await?;
-            }
-        }
 
         Ok(())
     }
@@ -652,8 +616,8 @@ impl Room {
         Ok(event)
     }
 
-    /// Try to load the event from the event cache, if it's enabled, or fetch it
-    /// from the homeserver.
+    /// Try to load the event from the [`EventCache`][crate::event_cache], if
+    /// it's enabled, or fetch it from the homeserver.
     ///
     /// When running the request against the homeserver, it uses the given
     /// [`RequestConfig`] if provided, or the client's default one
@@ -665,7 +629,7 @@ impl Room {
     ) -> Result<TimelineEvent> {
         match self.event_cache().await {
             Ok((event_cache, _drop_handles)) => {
-                if let Some(event) = event_cache.event(event_id).await {
+                if let Some(event) = event_cache.find_event(event_id).await {
                     return Ok(event);
                 }
                 // Fallthrough: try with a request.
@@ -1508,12 +1472,12 @@ impl Room {
         let machine = self.client.olm_machine().await;
         let machine = machine.as_ref().ok_or(Error::NoOlmMachine)?;
 
-        let decryption_settings = DecryptionSettings {
-            sender_device_trust_requirement: self.client.base_client().decryption_trust_requirement,
-        };
-
         match machine
-            .try_decrypt_room_event(event.cast_ref(), self.inner.room_id(), &decryption_settings)
+            .try_decrypt_room_event(
+                event.cast_ref(),
+                self.inner.room_id(),
+                self.client.decryption_settings(),
+            )
             .await?
         {
             RoomEventDecryptionResult::Decrypted(decrypted) => {
@@ -3711,7 +3675,7 @@ impl RoomIdentityProvider for Room {
 
 /// A wrapper for a weak client and a room id that allows to lazily retrieve a
 /// room, only when needed.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct WeakRoom {
     client: WeakClient,
     room_id: OwnedRoomId,

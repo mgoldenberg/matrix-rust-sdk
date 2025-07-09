@@ -14,7 +14,7 @@
 
 //! An SQLite-based backend for the [`EventCacheStore`].
 
-use std::{borrow::Cow, fmt, iter::once, path::Path, sync::Arc};
+use std::{fmt, iter::once, path::Path, sync::Arc};
 
 use async_trait::async_trait;
 use deadpool_sqlite::{Object as SqliteAsyncConn, Pool as SqlitePool, Runtime};
@@ -32,8 +32,8 @@ use matrix_sdk_base::{
         Event, Gap,
     },
     linked_chunk::{
-        ChunkContent, ChunkIdentifier, ChunkIdentifierGenerator, LinkedChunkId, Position, RawChunk,
-        Update,
+        ChunkContent, ChunkIdentifier, ChunkIdentifierGenerator, ChunkMetadata, LinkedChunkId,
+        Position, RawChunk, Update,
     },
     media::{MediaRequestParameters, UniqueKey},
 };
@@ -49,8 +49,8 @@ use tracing::{debug, error, trace};
 use crate::{
     error::{Error, Result},
     utils::{
-        repeat_vars, time_to_timestamp, Key, SqliteAsyncConnExt, SqliteKeyValueStoreAsyncConnExt,
-        SqliteKeyValueStoreConnExt, SqliteTransactionExt,
+        repeat_vars, time_to_timestamp, EncryptableStore, Key, SqliteAsyncConnExt,
+        SqliteKeyValueStoreAsyncConnExt, SqliteKeyValueStoreConnExt, SqliteTransactionExt,
     },
     OpenStoreError, SqliteStoreConfig,
 };
@@ -94,6 +94,12 @@ pub struct SqliteEventCacheStore {
 impl fmt::Debug for SqliteEventCacheStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SqliteEventCacheStore").finish_non_exhaustive()
+    }
+}
+
+impl EncryptableStore for SqliteEventCacheStore {
+    fn get_cypher(&self) -> Option<&StoreCipher> {
+        self.store_cipher.as_deref()
     }
 }
 
@@ -146,34 +152,6 @@ impl SqliteEventCacheStore {
         media_service.restore(media_retention_policy, last_media_cleanup_time);
 
         Ok(Self { store_cipher, pool, media_service })
-    }
-
-    fn encode_value(&self, value: Vec<u8>) -> Result<Vec<u8>> {
-        if let Some(key) = &self.store_cipher {
-            let encrypted = key.encrypt_value_data(value)?;
-            Ok(rmp_serde::to_vec_named(&encrypted)?)
-        } else {
-            Ok(value)
-        }
-    }
-
-    fn decode_value<'a>(&self, value: &'a [u8]) -> Result<Cow<'a, [u8]>> {
-        if let Some(key) = &self.store_cipher {
-            let encrypted = rmp_serde::from_slice(value)?;
-            let decrypted = key.decrypt_value_data(encrypted)?;
-            Ok(Cow::Owned(decrypted))
-        } else {
-            Ok(Cow::Borrowed(value))
-        }
-    }
-
-    fn encode_key(&self, table_name: &str, key: impl AsRef<[u8]>) -> Key {
-        let bytes = key.as_ref();
-        if let Some(store_cipher) = &self.store_cipher {
-            Key::Hashed(store_cipher.hash_key(table_name, bytes))
-        } else {
-            Key::Plain(bytes.to_owned())
-        }
     }
 
     async fn acquire(&self) -> Result<SqliteAsyncConn> {
@@ -836,6 +814,66 @@ impl EventCacheStore for SqliteEventCacheStore {
         Ok(result)
     }
 
+    async fn load_all_chunks_metadata(
+        &self,
+        linked_chunk_id: LinkedChunkId<'_>,
+    ) -> Result<Vec<ChunkMetadata>, Self::Error> {
+        let hashed_linked_chunk_id =
+            self.encode_key(keys::LINKED_CHUNKS, linked_chunk_id.storage_key());
+
+        self.acquire()
+            .await?
+            .with_transaction(move |txn| -> Result<_> {
+                // I'm not a DB analyst, so for my own future sanity: this query joins the
+                // linked_chunks and events_chunks tables together, with a few specificities:
+                //
+                // - the `GROUP BY` clause will regroup the joined item lines by chunk.
+                // - the `COUNT(ec.event_id)` counts the number of unique non-NULL lines from
+                //   the events_chunks table, aka the number of events in the chunk.
+                // - using a `LEFT JOIN` makes it so that if there's a chunk that has no events
+                //   (because it's a gap, or an empty events chunk), there will still be a
+                //   result for that chunk, and the count will be `0` (because the joined lines
+                //   would be `NULL`).
+                //
+                // Overall, this query will return what we want:
+                // - for a gap or an empty item chunk: a count of 0,
+                // - otherwise, the number of related lines in `event_chunks` for that chunk,
+                //   i.e. the number of events in that chunk.
+                //
+                // Also, use `ORDER BY id` to get a deterministic ordering for testing purposes.
+
+                txn.prepare(
+                    r#"
+                        SELECT lc.id, lc.previous, lc.next, COUNT(ec.event_id)
+                        FROM linked_chunks as lc
+                        LEFT JOIN event_chunks as ec ON ec.chunk_id = lc.id
+                        WHERE lc.linked_chunk_id = ?
+                        GROUP BY lc.id
+                        ORDER BY lc.id"#,
+                )?
+                .query_map((&hashed_linked_chunk_id,), |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, Option<u64>>(1)?,
+                        row.get::<_, Option<u64>>(2)?,
+                        row.get::<_, usize>(3)?,
+                    ))
+                })?
+                .map(|data| -> Result<_> {
+                    let (id, previous, next, num_items) = data?;
+
+                    Ok(ChunkMetadata {
+                        identifier: ChunkIdentifier::new(id),
+                        previous: previous.map(ChunkIdentifier::new),
+                        next: next.map(ChunkIdentifier::new),
+                        num_items,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()
+            })
+            .await
+    }
+
     async fn load_last_chunk(
         &self,
         linked_chunk_id: LinkedChunkId<'_>,
@@ -1105,8 +1143,11 @@ impl EventCacheStore for SqliteEventCacheStore {
         room_id: &RoomId,
         event_id: &EventId,
         filters: Option<&[RelationType]>,
-    ) -> Result<Vec<Event>, Self::Error> {
+    ) -> Result<Vec<(Event, Option<Position>)>, Self::Error> {
         let hashed_room_id = self.encode_key(keys::LINKED_CHUNKS, room_id);
+
+        let hashed_linked_chunk_id =
+            self.encode_key(keys::LINKED_CHUNKS, LinkedChunkId::Room(room_id).storage_key());
 
         let event_id = event_id.to_owned();
         let filters = filters.map(ToOwned::to_owned);
@@ -1130,19 +1171,34 @@ impl EventCacheStore for SqliteEventCacheStore {
                 };
 
                 let query = format!(
-                    "SELECT content FROM events WHERE relates_to = ? AND room_id = ? {filter_query}"
+                    "SELECT events.content, event_chunks.chunk_id, event_chunks.position
+                    FROM events
+                    LEFT JOIN event_chunks ON events.event_id = event_chunks.event_id AND event_chunks.linked_chunk_id = ?
+                    WHERE relates_to = ? AND room_id = ? {filter_query}"
                 );
 
                 // Collect related events.
                 let mut related = Vec::new();
-                for ev in
-                    txn.prepare(&query)?.query_map((event_id.as_str(), hashed_room_id), |row| {
-                        row.get::<_, Vec<u8>>(0)
+                for result in
+                    txn.prepare(&query)?.query_map((hashed_linked_chunk_id, event_id.as_str(), hashed_room_id), |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, Option<u64>>(1)?,
+                            row.get::<_, Option<usize>>(2)?,
+                        ))
                     })?
                 {
-                    let ev = ev?;
-                    let ev = serde_json::from_slice(&this.decode_value(&ev)?)?;
-                    related.push(ev);
+                    let (event_blob, chunk_id, index) = result?;
+
+                    let event: Event = serde_json::from_slice(&this.decode_value(&event_blob)?)?;
+
+                    // Only build the position if both the chunk_id and position were present; in
+                    // theory, they should either be present at the same time, or not at all.
+                    let pos = chunk_id.zip(index).map(|(chunk_id, index)| {
+                        Position::new(ChunkIdentifier::new(chunk_id), index)
+                    });
+
+                    related.push((event, pos));
                 }
 
                 Ok(related)
@@ -1482,7 +1538,7 @@ impl EventCacheStoreMedia for SqliteEventCacheStore {
                                     limit_reached = true;
                                     rows_to_remove.push(row_id);
                                 }
-                            };
+                            }
                         }
 
                         if !rows_to_remove.is_empty() {
@@ -1631,7 +1687,11 @@ mod tests {
     use tempfile::{tempdir, TempDir};
 
     use super::SqliteEventCacheStore;
-    use crate::{event_cache_store::keys, utils::SqliteAsyncConnExt, SqliteStoreConfig};
+    use crate::{
+        event_cache_store::keys,
+        utils::{EncryptableStore as _, SqliteAsyncConnExt},
+        SqliteStoreConfig,
+    };
 
     static TMP_DIR: Lazy<TempDir> = Lazy::new(|| tempdir().unwrap());
     static NUM: AtomicU32 = AtomicU32::new(0);

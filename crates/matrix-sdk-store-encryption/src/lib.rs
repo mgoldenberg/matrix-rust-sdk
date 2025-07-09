@@ -77,7 +77,10 @@ pub enum Error {
 
     /// Failed to import a store cipher, the export used a passphrase while
     /// we are trying to import it using a key or vice-versa.
-    #[error("Failed to import a store cipher, the export used a passphrase while we are trying to import it using a key or vice-versa")]
+    #[error(
+        "Failed to import a store cipher, the export used a passphrase while we are trying to \
+         import it using a key or vice-versa"
+    )]
     KdfMismatch,
 }
 
@@ -338,7 +341,7 @@ impl StoreCipher {
 
         if let KdfInfo::Pbkdf2ToChaCha20Poly1305 { .. } = encrypted.kdf_info {
             return Err(Error::KdfMismatch);
-        };
+        }
 
         let key = ChachaKey::from_slice(key.as_ref());
 

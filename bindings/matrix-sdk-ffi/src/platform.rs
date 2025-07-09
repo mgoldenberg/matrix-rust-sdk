@@ -137,7 +137,7 @@ where
 
         if let Some(max_files) = c.max_files {
             builder = builder.max_log_files(max_files as usize)
-        };
+        }
         if let Some(file_suffix) = c.file_suffix {
             builder = builder.filename_suffix(file_suffix)
         }
@@ -261,6 +261,7 @@ enum LogTarget {
 
     // SDK UI modules.
     MatrixSdkUiTimeline,
+    MatrixSdkUiNotificationClient,
 }
 
 impl LogTarget {
@@ -283,6 +284,7 @@ impl LogTarget {
             LogTarget::MatrixSdkSendQueue => "matrix_sdk::send_queue",
             LogTarget::MatrixSdkEventCacheStore => "matrix_sdk_sqlite::event_cache_store",
             LogTarget::MatrixSdkUiTimeline => "matrix_sdk_ui::timeline",
+            LogTarget::MatrixSdkUiNotificationClient => "matrix_sdk_ui::notification_client",
         }
     }
 }
@@ -305,6 +307,7 @@ const DEFAULT_TARGET_LOG_LEVELS: &[(LogTarget, LogLevel)] = &[
     (LogTarget::MatrixSdkEventCacheStore, LogLevel::Info),
     (LogTarget::MatrixSdkCommonStoreLocks, LogLevel::Warn),
     (LogTarget::MatrixSdkBaseStoreAmbiguityMap, LogLevel::Warn),
+    (LogTarget::MatrixSdkUiNotificationClient, LogLevel::Info),
 ];
 
 const IMMUTABLE_LOG_TARGETS: &[LogTarget] = &[
@@ -325,6 +328,8 @@ pub enum TraceLogPacks {
     SendQueue,
     /// Enables all the logs relevant to the timeline.
     Timeline,
+    /// Enables all the logs relevant to the notification client.
+    NotificationClient,
 }
 
 impl TraceLogPacks {
@@ -339,6 +344,7 @@ impl TraceLogPacks {
             ],
             TraceLogPacks::SendQueue => &[LogTarget::MatrixSdkSendQueue],
             TraceLogPacks::Timeline => &[LogTarget::MatrixSdkUiTimeline],
+            TraceLogPacks::NotificationClient => &[LogTarget::MatrixSdkUiNotificationClient],
         }
     }
 }
@@ -526,15 +532,22 @@ pub fn init_platform(
     config: TracingConfiguration,
     use_lightweight_tokio_runtime: bool,
 ) -> Result<(), ClientError> {
-    LOGGING.set(config.build()).map_err(|_| ClientError::Generic {
-        msg: "logger already initialized".to_owned(),
-        details: None,
-    })?;
+    #[cfg(all(feature = "js", target_family = "wasm"))]
+    {
+        console_error_panic_hook::set_once();
+    }
+    #[cfg(not(target_family = "wasm"))]
+    {
+        LOGGING.set(config.build()).map_err(|_| ClientError::Generic {
+            msg: "logger already initialized".to_owned(),
+            details: None,
+        })?;
 
-    if use_lightweight_tokio_runtime {
-        setup_lightweight_tokio_runtime();
-    } else {
-        setup_multithreaded_tokio_runtime();
+        if use_lightweight_tokio_runtime {
+            setup_lightweight_tokio_runtime();
+        } else {
+            setup_multithreaded_tokio_runtime();
+        }
     }
 
     Ok(())
@@ -557,6 +570,7 @@ pub fn enable_sentry_logging(enabled: bool) {
     };
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn setup_multithreaded_tokio_runtime() {
     async_compat::set_runtime_builder(Box::new(|| {
         eprintln!("spawning a multithreaded tokio runtime");
@@ -567,6 +581,7 @@ fn setup_multithreaded_tokio_runtime() {
     }));
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn setup_lightweight_tokio_runtime() {
     async_compat::set_runtime_builder(Box::new(|| {
         eprintln!("spawning a lightweight tokio runtime");
@@ -617,25 +632,30 @@ mod tests {
 
         assert_eq!(
             filter,
-            "panic=error,\
-            hyper=warn,\
-            matrix_sdk_ffi=info,\
-            matrix_sdk=info,\
-            matrix_sdk::client=trace,\
-            matrix_sdk_crypto=debug,\
-            matrix_sdk_crypto::olm::account=trace,\
-            matrix_sdk::oidc=trace,\
-            matrix_sdk::http_client=debug,\
-            matrix_sdk::sliding_sync=info,\
-            matrix_sdk_base::sliding_sync=info,\
-            matrix_sdk_ui::timeline=info,\
-            matrix_sdk::send_queue=info,\
-            matrix_sdk::event_cache=info,\
-            matrix_sdk_base::event_cache=info,\
-            matrix_sdk_sqlite::event_cache_store=info,\
-            matrix_sdk_common::store_locks=warn,\
-            matrix_sdk_base::store::ambiguity_map=warn,\
-            super_duper_app=error"
+            r#"panic=error,
+            hyper=warn,
+            matrix_sdk_ffi=info,
+            matrix_sdk=info,
+            matrix_sdk::client=trace,
+            matrix_sdk_crypto=debug,
+            matrix_sdk_crypto::olm::account=trace,
+            matrix_sdk::oidc=trace,
+            matrix_sdk::http_client=debug,
+            matrix_sdk::sliding_sync=info,
+            matrix_sdk_base::sliding_sync=info,
+            matrix_sdk_ui::timeline=info,
+            matrix_sdk::send_queue=info,
+            matrix_sdk::event_cache=info,
+            matrix_sdk_base::event_cache=info,
+            matrix_sdk_sqlite::event_cache_store=info,
+            matrix_sdk_common::store_locks=warn,
+            matrix_sdk_base::store::ambiguity_map=warn,
+            matrix_sdk_ui::notification_client=info,
+            super_duper_app=error"#
+                .split('\n')
+                .map(|s| s.trim())
+                .collect::<Vec<_>>()
+                .join("")
         );
     }
 
@@ -655,26 +675,31 @@ mod tests {
 
         assert_eq!(
             filter,
-            "panic=error,\
-            hyper=warn,\
-            matrix_sdk_ffi=info,\
-            matrix_sdk=info,\
-            matrix_sdk::client=trace,\
-            matrix_sdk_crypto=trace,\
-            matrix_sdk_crypto::olm::account=trace,\
-            matrix_sdk::oidc=trace,\
-            matrix_sdk::http_client=trace,\
-            matrix_sdk::sliding_sync=trace,\
-            matrix_sdk_base::sliding_sync=trace,\
-            matrix_sdk_ui::timeline=trace,\
-            matrix_sdk::send_queue=trace,\
-            matrix_sdk::event_cache=trace,\
-            matrix_sdk_base::event_cache=trace,\
-            matrix_sdk_sqlite::event_cache_store=trace,\
-            matrix_sdk_common::store_locks=warn,\
-            matrix_sdk_base::store::ambiguity_map=warn,\
-            super_duper_app=trace,\
-            some_other_span=trace"
+            r#"panic=error,
+            hyper=warn,
+            matrix_sdk_ffi=info,
+            matrix_sdk=info,
+            matrix_sdk::client=trace,
+            matrix_sdk_crypto=trace,
+            matrix_sdk_crypto::olm::account=trace,
+            matrix_sdk::oidc=trace,
+            matrix_sdk::http_client=trace,
+            matrix_sdk::sliding_sync=trace,
+            matrix_sdk_base::sliding_sync=trace,
+            matrix_sdk_ui::timeline=trace,
+            matrix_sdk::send_queue=trace,
+            matrix_sdk::event_cache=trace,
+            matrix_sdk_base::event_cache=trace,
+            matrix_sdk_sqlite::event_cache_store=trace,
+            matrix_sdk_common::store_locks=warn,
+            matrix_sdk_base::store::ambiguity_map=warn,
+            matrix_sdk_ui::notification_client=trace,
+            super_duper_app=trace,
+            some_other_span=trace"#
+                .split('\n')
+                .map(|s| s.trim())
+                .collect::<Vec<_>>()
+                .join("")
         );
     }
 
@@ -712,6 +737,7 @@ mod tests {
             matrix_sdk_sqlite::event_cache_store=trace,
             matrix_sdk_common::store_locks=warn,
             matrix_sdk_base::store::ambiguity_map=warn,
+            matrix_sdk_ui::notification_client=info,
             super_duper_app=info"#
                 .split('\n')
                 .map(|s| s.trim())

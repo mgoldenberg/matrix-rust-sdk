@@ -75,7 +75,7 @@ impl BaseClient {
                 .collect(),
             processors::e2ee::E2EE::new(
                 olm_machine.as_ref(),
-                self.decryption_trust_requirement,
+                &self.decryption_settings,
                 self.handle_verification_events,
             ),
         )
@@ -117,7 +117,7 @@ impl BaseClient {
             // we received a room reshuffling event only, there won't be anything for us to
             // process. stop early
             return Ok(SyncResponse::default());
-        };
+        }
 
         let mut context = processors::Context::default();
 
@@ -152,7 +152,7 @@ impl BaseClient {
                 #[cfg(feature = "e2e-encryption")]
                 processors::e2ee::E2EE::new(
                     self.olm_machine().await.as_ref(),
-                    self.decryption_trust_requirement,
+                    &self.decryption_settings,
                     self.handle_verification_events,
                 ),
                 processors::notification::Notification::new(
@@ -284,6 +284,7 @@ impl BaseClient {
                 room_previous_events,
                 &joined_room_update.timeline.events,
                 &mut room_info.read_receipts,
+                self.threading_support,
             );
 
             if prev_read_receipts != room_info.read_receipts {
@@ -348,6 +349,7 @@ mod tests {
     #[cfg(feature = "e2e-encryption")]
     use super::processors::room::msc4186::cache_latest_events;
     use crate::{
+        client::ThreadingSupport,
         room::{RoomHero, RoomInfoNotableUpdateReasons},
         store::{RoomLoadSettings, StoreConfig},
         test_utils::logged_in_base_client,
@@ -1157,7 +1159,7 @@ mod tests {
                 let store = StoreConfig::new("cross-process-foo".to_owned());
                 state_store = store.state_store.clone();
 
-                let client = BaseClient::new(store);
+                let client = BaseClient::new(store, ThreadingSupport::Disabled);
                 client
                     .activate(
                         session_meta.clone(),
@@ -1188,7 +1190,7 @@ mod tests {
             let client = {
                 let mut store = StoreConfig::new("cross-process-foo".to_owned());
                 store.state_store = state_store;
-                let client = BaseClient::new(store);
+                let client = BaseClient::new(store, ThreadingSupport::Disabled);
                 client
                     .activate(
                         session_meta,
@@ -1486,7 +1488,7 @@ mod tests {
     #[async_test]
     async fn test_when_only_one_event_we_cache_it() {
         let event1 = make_event("m.room.message", "$1");
-        let events = &[event1.clone()];
+        let events = std::slice::from_ref(&event1);
         let chosen = choose_event_to_cache(events).await;
         assert_eq!(ev_id(chosen), rawev_id(event1));
     }

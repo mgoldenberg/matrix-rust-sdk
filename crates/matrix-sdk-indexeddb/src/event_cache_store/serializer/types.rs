@@ -29,7 +29,7 @@
 
 use matrix_sdk_base::linked_chunk::ChunkIdentifier;
 use matrix_sdk_crypto::CryptoStoreError;
-use ruma::{events::relation::RelationType, OwnedEventId, RoomId};
+use ruma::{events::relation::RelationType, EventId, OwnedEventId, RoomId};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -42,14 +42,58 @@ use crate::{
     serializer::{IndexeddbSerializer, MaybeEncrypted},
 };
 
+/// The first unicode character, and hence the lower bound for IndexedDB keys
+/// (or key components) which are represented as strings.
+///
+/// This value is useful for constructing a key range over all strings when used
+/// in conjunction with [`INDEXED_KEY_UPPER_CHARACTER`].
+const INDEXED_KEY_LOWER_CHARACTER: char = '\u{0000}';
+
+/// The last unicode character in the [Basic Multilingual Plane][1]. This seems
+/// like a reasonable place to set the upper bound for IndexedDB keys (or key
+/// components) which are represented as strings, though one could
+/// theoretically set it to `\u{10FFFF}`.
+///
+/// This value is useful for constructing a key range over all strings when used
+/// in conjunction with [`INDEXED_KEY_LOWER_CHARACTER`].
+///
+/// [1]: https://en.wikipedia.org/wiki/Plane_(Unicode)#Basic_Multilingual_Plane
+const INDEXED_KEY_UPPER_CHARACTER: char = '\u{FFFF}';
+
+/// Representation of a range of keys of type `K`. This is loosely
+/// correlated with [IDBKeyRange][1], with a few differences.
+///
+/// Firstly, this enum only provides a single way to express a bounded range
+/// which is always inclusive on both bounds. While all ranges can still be
+/// represented, [`IDBKeyRange`][1] provides more flexibility in this regard.
+///
+/// Secondly, this enum provides a way to express the range of all keys
+/// of type `K`.
+///
+/// [1]: https://developer.mozilla.org/en-US/docs/Web/API/IDBKeyRange
 #[derive(Debug, Copy, Clone)]
 pub enum IndexedKeyRange<K> {
+    /// Represents a single key of type `K`.
+    ///
+    /// Identical to [`IDBKeyRange.only`][1].
+    ///
+    /// [1]: https://developer.mozilla.org/en-US/docs/Web/API/IDBKeyRange/only
     Only(K),
+    /// Represents an inclusive range of keys of type `K`
+    /// where the first item is the lower bound and the
+    /// second item is the upper bound.
+    ///
+    /// Similar to [`IDBKeyRange.bound`][1].
+    ///
+    /// [1]: https://developer.mozilla.org/en-US/docs/Web/API/IDBKeyRange/bound
     Bound(K, K),
+    /// Represents an inclusive range of all keys of type `K`.
     All,
 }
 
 impl<C> IndexedKeyRange<&C> {
+    /// Encodes a range of key components of type `K::KeyComponents`
+    /// into a range of keys of type `K`.
     pub fn encoded<T, K>(
         &self,
         room_id: &RoomId,
@@ -95,23 +139,6 @@ pub struct ValueWithId {
     pub id: String,
     pub value: MaybeEncrypted,
 }
-/// The first unicode character, and hence the lower bound for IndexedDB keys
-/// (or key components) which are represented as strings.
-///
-/// This value is useful for constructing a key range over all strings when used
-/// in conjunction with [`INDEXED_KEY_UPPER_CHARACTER`].
-const INDEXED_KEY_LOWER_CHARACTER: char = '\u{0000}';
-
-/// The last unicode character in the [Basic Multilingual Plane][1]. This seems
-/// like a reasonable place to set the upper bound for IndexedDB keys (or key
-/// components) which are represented as strings, though one could
-/// theoretically set it to `\u{10FFFF}`.
-///
-/// This value is useful for constructing a key range over all strings when used
-/// in conjunction with [`INDEXED_KEY_LOWER_CHARACTER`].
-///
-/// [1]: https://en.wikipedia.org/wiki/Plane_(Unicode)#Basic_Multilingual_Plane
-const INDEXED_KEY_UPPER_CHARACTER: char = '\u{FFFF}';
 
 /// Represents the [`LINKED_CHUNKS`][1] object store.
 ///
@@ -231,11 +258,9 @@ impl IndexedNextChunkIdKey {
 }
 
 impl IndexedKey<Chunk> for IndexedNextChunkIdKey {
-    type KeyComponents = Option<ChunkIdentifier>;
+    const INDEX: Option<&'static str> = Some(keys::LINKED_CHUNKS_NEXT);
 
-    fn index() -> Option<&'static str> {
-        Some(keys::LINKED_CHUNKS_NEXT)
-    }
+    type KeyComponents = Option<ChunkIdentifier>;
 
     fn encode(
         room_id: &RoomId,
@@ -259,6 +284,7 @@ impl IndexedKeyComponentBounds<Chunk> for IndexedNextChunkIdKey {
     fn lower_key_components() -> Self::KeyComponents {
         None
     }
+
     fn upper_key_components() -> Self::KeyComponents {
         Some(ChunkIdentifier::new(js_sys::Number::MAX_SAFE_INTEGER as u64))
     }
@@ -339,27 +365,17 @@ impl IndexedKey<Event> for IndexedEventIdKey {
     fn encode(room_id: &RoomId, event_id: &OwnedEventId, serializer: &IndexeddbSerializer) -> Self {
         let room_id = serializer.encode_key_as_string(keys::ROOMS, room_id);
         let event_id = serializer.encode_key_as_string(keys::EVENTS, event_id);
-        IndexedEventIdKey::new(room_id, event_id)
-    }
-}
-
-impl IndexedKeyBounds<Event> for IndexedEventIdKey {
-    fn lower_key(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
-        let room_id = serializer.encode_key_as_string(keys::ROOMS, room_id);
-        let event_id = String::from(INDEXED_KEY_LOWER_CHARACTER);
-        Self(room_id, event_id)
-    }
-
-    fn upper_key(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
-        let room_id = serializer.encode_key_as_string(keys::ROOMS, room_id);
-        let event_id = String::from(INDEXED_KEY_UPPER_CHARACTER);
         Self(room_id, event_id)
     }
 }
 
-impl IndexedEventIdKey {
-    pub fn new(room_id: IndexedRoomId, event_id: IndexedEventId) -> Self {
-        Self(room_id, event_id)
+impl IndexedKeyComponentBounds<Event> for IndexedEventIdKey {
+    fn lower_key_components() -> Self::KeyComponents {
+        OwnedEventId::try_from(format!("${INDEXED_KEY_LOWER_CHARACTER}")).expect("valid event id")
+    }
+
+    fn upper_key_components() -> Self::KeyComponents {
+        OwnedEventId::try_from(format!("${INDEXED_KEY_UPPER_CHARACTER}")).expect("valid event id")
     }
 }
 
@@ -377,11 +393,9 @@ pub type IndexedEventId = String;
 pub struct IndexedEventPositionKey(IndexedRoomId, IndexedChunkId, IndexedEventPositionIndex);
 
 impl IndexedKey<Event> for IndexedEventPositionKey {
-    type KeyComponents = Position;
+    const INDEX: Option<&'static str> = Some(keys::EVENTS_POSITION);
 
-    fn index() -> Option<&'static str> {
-        Some(keys::EVENTS_POSITION)
-    }
+    type KeyComponents = Position;
 
     fn encode(room_id: &RoomId, position: &Position, serializer: &IndexeddbSerializer) -> Self {
         let room_id = serializer.encode_key_as_string(keys::ROOMS, room_id);
@@ -430,11 +444,9 @@ impl IndexedEventRelationKey {
 }
 
 impl IndexedKey<Event> for IndexedEventRelationKey {
-    type KeyComponents = (OwnedEventId, RelationType);
+    const INDEX: Option<&'static str> = Some(keys::EVENTS_RELATION);
 
-    fn index() -> Option<&'static str> {
-        Some(keys::EVENTS_RELATION)
-    }
+    type KeyComponents = (OwnedEventId, RelationType);
 
     fn encode(
         room_id: &RoomId,
