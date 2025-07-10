@@ -40,7 +40,6 @@ use wasm_bindgen::JsValue;
 use web_sys::IdbTransactionMode;
 
 use crate::event_cache_store::{
-    migrations::current::keys,
     serializer::{traits::Indexed, IndexeddbEventCacheStoreSerializer},
     transaction::{IndexeddbEventCacheStoreTransaction, IndexeddbEventCacheStoreTransactionError},
     types::{ChunkType, InBandEvent, Lease, OutOfBandEvent},
@@ -137,19 +136,22 @@ impl_event_cache_store! {
     ) -> Result<bool, IndexeddbEventCacheStoreError> {
         let now = Duration::from_millis(MilliSecondsSinceUnixEpoch::now().get().into());
 
-        let transaction = self.transaction(&[Lease::OBJECT_STORE], IdbTransactionMode::Readwrite)?;
+        let transaction =
+            self.transaction(&[Lease::OBJECT_STORE], IdbTransactionMode::Readwrite)?;
 
         if let Some(lease) = transaction.get_lease_by_id(key).await? {
             if lease.holder != holder && !lease.expired_at(now) {
-                return Ok(false)
+                return Ok(false);
             }
         }
 
-        transaction.put_lease(&Lease {
-            key: key.to_owned(),
-            holder: holder.to_owned(),
-            expiration: now + Duration::from_millis(lease_duration_ms.into()),
-        }).await?;
+        transaction
+            .put_lease(&Lease {
+                key: key.to_owned(),
+                holder: holder.to_owned(),
+                expiration: now + Duration::from_millis(lease_duration_ms.into()),
+            })
+            .await?;
 
         Ok(true)
     }
@@ -163,7 +165,7 @@ impl_event_cache_store! {
         let room_id = linked_chunk_id.room_id();
 
         let transaction = self.transaction(
-            &[keys::LINKED_CHUNKS, keys::GAPS, keys::EVENTS],
+            &[types::Chunk::OBJECT_STORE, types::Event::OBJECT_STORE, types::Gap::OBJECT_STORE],
             IdbTransactionMode::Readwrite,
         )?;
 
@@ -285,7 +287,7 @@ impl_event_cache_store! {
         let room_id = linked_chunk_id.room_id();
 
         let transaction = self.transaction(
-            &[keys::LINKED_CHUNKS, keys::GAPS, keys::EVENTS],
+            &[types::Chunk::OBJECT_STORE, types::Event::OBJECT_STORE, types::Gap::OBJECT_STORE],
             IdbTransactionMode::Readwrite,
         )?;
 
@@ -310,7 +312,7 @@ impl_event_cache_store! {
         let room_id = linked_chunk_id.room_id();
 
         let transaction = self.transaction(
-            &[keys::LINKED_CHUNKS, keys::GAPS, keys::EVENTS],
+            &[types::Chunk::OBJECT_STORE, types::Event::OBJECT_STORE, types::Gap::OBJECT_STORE],
             IdbTransactionMode::Readwrite,
         )?;
 
@@ -339,7 +341,7 @@ impl_event_cache_store! {
         let linked_chunk_id = linked_chunk_id.to_owned();
         let room_id = linked_chunk_id.room_id();
         let transaction = self.transaction(
-            &[keys::LINKED_CHUNKS, keys::EVENTS, keys::GAPS],
+            &[types::Chunk::OBJECT_STORE, types::Event::OBJECT_STORE, types::Gap::OBJECT_STORE],
             IdbTransactionMode::Readonly,
         )?;
 
@@ -378,7 +380,7 @@ impl_event_cache_store! {
         let linked_chunk_id = linked_chunk_id.to_owned();
         let room_id = linked_chunk_id.room_id();
         let transaction = self.transaction(
-            &[keys::LINKED_CHUNKS, keys::EVENTS, keys::GAPS],
+            &[types::Chunk::OBJECT_STORE, types::Event::OBJECT_STORE, types::Gap::OBJECT_STORE],
             IdbTransactionMode::Readonly,
         )?;
         if let Some(chunk) = transaction.get_chunk_by_id(room_id, &before_chunk_identifier).await? {
@@ -392,7 +394,7 @@ impl_event_cache_store! {
 
     async fn clear_all_linked_chunks(&self) -> Result<(), IndexeddbEventCacheStoreError> {
         let transaction = self.transaction(
-            &[keys::LINKED_CHUNKS, keys::EVENTS, keys::GAPS],
+            &[types::Chunk::OBJECT_STORE, types::Event::OBJECT_STORE, types::Gap::OBJECT_STORE],
             IdbTransactionMode::Readwrite,
         )?;
         transaction.clear::<types::Chunk>().await?;
@@ -413,7 +415,8 @@ impl_event_cache_store! {
 
         let linked_chunk_id = linked_chunk_id.to_owned();
         let room_id = linked_chunk_id.room_id();
-        let transaction = self.transaction(&[keys::EVENTS], IdbTransactionMode::Readonly)?;
+        let transaction =
+            self.transaction(&[types::Event::OBJECT_STORE], IdbTransactionMode::Readonly)?;
         let mut duplicated = Vec::new();
         for event_id in events {
             if let Some(types::Event::InBand(event)) =
@@ -430,7 +433,8 @@ impl_event_cache_store! {
         room_id: &RoomId,
         event_id: &EventId,
     ) -> Result<Option<Event>, IndexeddbEventCacheStoreError> {
-        let transaction = self.transaction(&[keys::EVENTS], IdbTransactionMode::Readonly)?;
+        let transaction =
+            self.transaction(&[types::Event::OBJECT_STORE], IdbTransactionMode::Readonly)?;
         transaction
             .get_event_by_id(room_id, &event_id.to_owned())
             .await
@@ -444,7 +448,8 @@ impl_event_cache_store! {
         event_id: &EventId,
         filter: Option<&[RelationType]>,
     ) -> Result<Vec<(Event, Option<Position>)>, IndexeddbEventCacheStoreError> {
-        let transaction = self.transaction(&[keys::EVENTS], IdbTransactionMode::Readonly)?;
+        let transaction =
+            self.transaction(&[types::Event::OBJECT_STORE], IdbTransactionMode::Readonly)?;
 
         let mut related_events = Vec::new();
         match filter {
@@ -479,7 +484,8 @@ impl_event_cache_store! {
             error!(%room_id, "Trying to save an event with no ID");
             return Ok(());
         };
-        let transaction = self.transaction(&[keys::EVENTS], IdbTransactionMode::Readwrite)?;
+        let transaction =
+            self.transaction(&[types::Event::OBJECT_STORE], IdbTransactionMode::Readwrite)?;
         let event = match transaction.get_event_by_id(room_id, &event_id).await? {
             Some(mut inner) => inner.set_content(event),
             None => types::Event::OutOfBand(OutOfBandEvent { content: event, position: () }),
