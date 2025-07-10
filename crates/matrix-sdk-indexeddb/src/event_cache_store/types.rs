@@ -12,12 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
+use std::time::Duration;
+
 use matrix_sdk_base::{
     deserialized_responses::TimelineEvent, event_cache::store::extract_event_relation,
     linked_chunk::ChunkIdentifier,
 };
 use ruma::OwnedEventId;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Lease {
+    pub key: String,
+    pub holder: String,
+    pub expiration: Duration,
+}
+
+impl Lease {
+    pub fn expired_at(&self, t: Duration) -> bool {
+        self.expiration < t
+    }
+}
 
 /// Representation of a [`Chunk`](matrix_sdk_base::linked_chunk::Chunk)
 /// which can be stored in IndexedDB.

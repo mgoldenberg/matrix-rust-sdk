@@ -14,6 +14,8 @@
 
 #![allow(unused)]
 
+use std::time::Duration;
+
 use indexed_db_futures::{IdbDatabase, IdbQuerySource};
 use matrix_sdk_base::{
     event_cache::{
@@ -39,9 +41,9 @@ use web_sys::IdbTransactionMode;
 
 use crate::event_cache_store::{
     migrations::current::keys,
-    serializer::IndexeddbEventCacheStoreSerializer,
+    serializer::{traits::Indexed, IndexeddbEventCacheStoreSerializer},
     transaction::{IndexeddbEventCacheStoreTransaction, IndexeddbEventCacheStoreTransactionError},
-    types::{ChunkType, InBandEvent, OutOfBandEvent},
+    types::{ChunkType, InBandEvent, Lease, OutOfBandEvent},
 };
 
 mod builder;
@@ -133,38 +135,23 @@ impl_event_cache_store! {
         key: &str,
         holder: &str,
     ) -> Result<bool, IndexeddbEventCacheStoreError> {
-        let key = JsValue::from_str(key);
-        let txn =
-            self.inner.transaction_on_one_with_mode(keys::CORE, IdbTransactionMode::Readwrite)?;
-        let object_store = txn.object_store(keys::CORE)?;
+        let now = Duration::from_millis(MilliSecondsSinceUnixEpoch::now().get().into());
 
-        #[derive(serde::Deserialize, serde::Serialize)]
-        struct Lease {
-            holder: String,
-            expiration_ts: u64,
-        }
+        let transaction = self.transaction(&[Lease::OBJECT_STORE], IdbTransactionMode::Readwrite)?;
 
-        let now_ts: u64 = MilliSecondsSinceUnixEpoch::now().get().into();
-        let expiration_ts = now_ts + lease_duration_ms as u64;
-        let value =
-            self.serializer.serialize_value(&Lease { holder: holder.to_owned(), expiration_ts })?;
-
-        let prev = object_store.get(&key)?.await?;
-        match prev {
-            Some(prev) => {
-                let lease: Lease = self.serializer.deserialize_value(prev)?;
-                if lease.holder == holder || lease.expiration_ts < now_ts {
-                    object_store.put_key_val(&key, &value)?;
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            }
-            None => {
-                object_store.put_key_val(&key, &value)?;
-                Ok(true)
+        if let Some(lease) = transaction.get_lease_by_id(key).await? {
+            if lease.holder != holder && !lease.expired_at(now) {
+                return Ok(false)
             }
         }
+
+        transaction.put_lease(&Lease {
+            key: key.to_owned(),
+            holder: holder.to_owned(),
+            expiration: now + Duration::from_millis(lease_duration_ms.into()),
+        }).await?;
+
+        Ok(true)
     }
 
     async fn handle_linked_chunk_updates(

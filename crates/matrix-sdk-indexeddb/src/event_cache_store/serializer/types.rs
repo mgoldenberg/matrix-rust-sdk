@@ -37,7 +37,7 @@ use crate::{
     event_cache_store::{
         migrations::current::keys,
         serializer::traits::{Indexed, IndexedKey, IndexedKeyBounds, IndexedKeyComponentBounds},
-        types::{Chunk, Event, Gap, Position},
+        types::{Chunk, Event, Gap, Lease, Position},
     },
     serializer::{IndexeddbSerializer, MaybeEncrypted},
 };
@@ -139,6 +139,61 @@ pub struct ValueWithId {
     pub id: String,
     pub value: MaybeEncrypted,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IndexedLease {
+    pub id: IndexedLeaseIdKey,
+    pub content: IndexedLeaseContent,
+}
+
+impl Indexed for Lease {
+    type IndexedType = IndexedLease;
+
+    const OBJECT_STORE: &'static str = keys::LEASES;
+
+    type Error = CryptoStoreError;
+
+    fn to_indexed(
+        &self,
+        _: &RoomId,
+        serializer: &IndexeddbSerializer,
+    ) -> Result<Self::IndexedType, Self::Error> {
+        Ok(IndexedLease { id: self.key.clone(), content: serializer.maybe_encrypt_value(self)? })
+    }
+
+    fn from_indexed(
+        indexed: Self::IndexedType,
+        serializer: &IndexeddbSerializer,
+    ) -> Result<Self, Self::Error> {
+        serializer.maybe_decrypt_value(indexed.content)
+    }
+}
+
+pub type IndexedLeaseIdKey = String;
+
+impl IndexedKey<Lease> for IndexedLeaseIdKey {
+    type KeyComponents = String;
+
+    fn encode(
+        _: &RoomId,
+        components: &Self::KeyComponents,
+        serializer: &IndexeddbSerializer,
+    ) -> Self {
+        serializer.encode_key_as_string(keys::LEASES, components)
+    }
+}
+
+impl IndexedKeyComponentBounds<Lease> for IndexedLeaseIdKey {
+    fn lower_key_components() -> Self::KeyComponents {
+        INDEXED_KEY_LOWER_CHARACTER.to_string()
+    }
+
+    fn upper_key_components() -> Self::KeyComponents {
+        INDEXED_KEY_UPPER_CHARACTER.to_string()
+    }
+}
+
+pub type IndexedLeaseContent = MaybeEncrypted;
 
 /// Represents the [`LINKED_CHUNKS`][1] object store.
 ///

@@ -17,7 +17,7 @@ use matrix_sdk_base::{
     event_cache::{store::EventCacheStoreError, Event as RawEvent, Gap as RawGap},
     linked_chunk::{ChunkContent, ChunkIdentifier, ChunkMetadata, RawChunk},
 };
-use ruma::{events::relation::RelationType, OwnedEventId, RoomId};
+use ruma::{events::relation::RelationType, room_id, OwnedEventId, RoomId};
 use serde::{
     de::{DeserializeOwned, Error},
     Serialize,
@@ -31,11 +31,11 @@ use crate::event_cache_store::{
         traits::{Indexed, IndexedKey, IndexedKeyBounds, IndexedKeyComponentBounds},
         types::{
             IndexedChunkIdKey, IndexedEventIdKey, IndexedEventPositionKey, IndexedEventRelationKey,
-            IndexedGapIdKey, IndexedKeyRange, IndexedNextChunkIdKey,
+            IndexedGapIdKey, IndexedKeyRange, IndexedLeaseIdKey, IndexedNextChunkIdKey,
         },
         IndexeddbEventCacheStoreSerializer,
     },
-    types::{Chunk, ChunkType, Event, Gap, Position},
+    types::{Chunk, ChunkType, Event, Gap, Lease, Position},
 };
 
 #[derive(Debug, Error)]
@@ -399,6 +399,24 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
         K: IndexedKeyBounds<T> + Serialize,
     {
         self.delete_items_by_key_components::<T, K>(room_id, key).await
+    }
+
+    pub async fn get_lease_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<Lease>, IndexeddbEventCacheStoreTransactionError> {
+        self.get_item_by_key_components::<Lease, IndexedLeaseIdKey>(
+            room_id!("!a:a"),
+            &id.to_owned(),
+        )
+        .await
+    }
+
+    pub async fn put_lease(
+        &self,
+        lease: &Lease,
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
+        self.put_item(room_id!("!a:a"), lease).await
     }
 
     pub async fn get_chunks_by_id(

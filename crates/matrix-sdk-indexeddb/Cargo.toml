@@ -25,6 +25,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 gloo-utils = { version = "0.2.0", features = ["serde"] }
+gloo-timers = { workspace = true, features = ["futures"] }
 growable-bloom-filter = { workspace = true, optional = true }
 hkdf.workspace = true
 indexed_db_futures = "0.5.0"

@@ -23,10 +23,15 @@ js = [
     "matrix-sdk-crypto?/js",
     "ruma/js",
     "matrix-sdk-store-encryption/js",
+    "gloo-timers",
 ]
 qrcode = ["matrix-sdk-crypto?/qrcode"]
-automatic-room-key-forwarding = ["matrix-sdk-crypto?/automatic-room-key-forwarding"]
-experimental-send-custom-to-device = ["matrix-sdk-crypto?/experimental-send-custom-to-device"]
+automatic-room-key-forwarding = [
+    "matrix-sdk-crypto?/automatic-room-key-forwarding",
+]
+experimental-send-custom-to-device = [
+    "matrix-sdk-crypto?/experimental-send-custom-to-device",
+]
 uniffi = ["dep:uniffi", "matrix-sdk-crypto?/uniffi", "matrix-sdk-common/uniffi"]
 
 # Private feature, see
@@ -62,6 +67,7 @@ decancer = "3.3.0"
 eyeball = { workspace = true, features = ["async-lock"] }
 eyeball-im.workspace = true
 futures-util.workspace = true
+gloo-timers = { workspace = true, features = ["futures"], optional = true }
 growable-bloom-filter.workspace = true
 http = { workspace = true, optional = true }
 matrix-sdk-common.workspace = true
