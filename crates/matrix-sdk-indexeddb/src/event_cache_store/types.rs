@@ -18,7 +18,7 @@ use matrix_sdk_base::{
     deserialized_responses::TimelineEvent, event_cache::store::extract_event_relation,
     linked_chunk::ChunkIdentifier,
 };
-use ruma::OwnedEventId;
+use ruma::{OwnedEventId, OwnedRoomId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,8 +36,10 @@ impl Lease {
 
 /// Representation of a [`Chunk`](matrix_sdk_base::linked_chunk::Chunk)
 /// which can be stored in IndexedDB.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chunk {
+    /// The room in which the chunk exists.
+    pub room_id: OwnedRoomId,
     /// The identifier of the chunk - i.e.,
     /// [`ChunkIdentifier`](matrix_sdk_base::linked_chunk::ChunkIdentifier).
     pub identifier: u64,
@@ -84,6 +86,13 @@ impl From<Event> for TimelineEvent {
 }
 
 impl Event {
+    pub fn room_id(&self) -> &OwnedRoomId {
+        match self {
+            Event::InBand(e) => &e.room_id,
+            Event::OutOfBand(e) => &e.room_id,
+        }
+    }
+
     /// The [`OwnedEventId`] of the underlying event.
     pub fn event_id(&self) -> Option<OwnedEventId> {
         match self {
@@ -127,6 +136,8 @@ impl Event {
 /// in-band or out-of-band.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GenericEvent<P> {
+    /// The room in which the event exists.
+    pub room_id: OwnedRoomId,
     /// The full content of the event.
     pub content: TimelineEvent,
     /// The position of the event, if it is in a chunk.
@@ -182,6 +193,8 @@ impl From<matrix_sdk_base::linked_chunk::Position> for Position {
 /// which can be stored in IndexedDB.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Gap {
+    /// The room in which the gap exists.
+    pub room_id: OwnedRoomId,
     /// The identifier of the chunk containing this gap.
     pub chunk_identifier: u64,
     /// The token to use in the query, extracted from a previous "from" /

@@ -175,8 +175,8 @@ impl_event_cache_store! {
                     trace!(%room_id, "Inserting new chunk (prev={previous:?}, new={new:?}, next={next:?})");
                     transaction
                         .add_chunk(
-                            room_id,
                             &types::Chunk {
+                                room_id: room_id.to_owned(),
                                 identifier: new.index(),
                                 previous: previous.map(|i| i.index()),
                                 next: next.map(|i| i.index()),
@@ -189,8 +189,8 @@ impl_event_cache_store! {
                     trace!(%room_id, "Inserting new gap (prev={previous:?}, new={new:?}, next={next:?})");
                     transaction
                         .add_item(
-                            room_id,
                             &types::Gap {
+                                room_id: room_id.to_owned(),
                                 chunk_identifier: new.index(),
                                 prev_token: gap.prev_token,
                             },
@@ -198,8 +198,8 @@ impl_event_cache_store! {
                         .await?;
                     transaction
                         .add_chunk(
-                            room_id,
                             &types::Chunk {
+                                room_id: room_id.to_owned(),
                                 identifier: new.index(),
                                 previous: previous.map(|i| i.index()),
                                 next: next.map(|i| i.index()),
@@ -220,8 +220,8 @@ impl_event_cache_store! {
                     for (i, item) in items.into_iter().enumerate() {
                         transaction
                             .put_event(
-                                room_id,
                                 &types::Event::InBand(InBandEvent {
+                                    room_id: room_id.to_owned(),
                                     content: item,
                                     position: types::Position {
                                         chunk_identifier,
@@ -240,8 +240,8 @@ impl_event_cache_store! {
 
                     transaction
                         .put_event(
-                            room_id,
                             &types::Event::InBand(InBandEvent {
+                                room_id: room_id.to_owned(),
                                 content: item,
                                 position: at.into(),
                             }),
@@ -455,8 +455,8 @@ impl_event_cache_store! {
         match filter {
             Some(relation_types) if !relation_types.is_empty() => {
                 for relation_type in relation_types {
-                    let relation = (event_id.to_owned(), relation_type.clone());
-                    let events = transaction.get_events_by_relation(room_id, &relation).await?;
+                    let key = (room_id.to_owned(), event_id.to_owned(), relation_type.clone());
+                    let events = transaction.get_events_by_relation(&key).await?;
                     for event in events {
                         let position = event.position().map(Into::into);
                         related_events.push((event.into(), position));
@@ -488,9 +488,9 @@ impl_event_cache_store! {
             self.transaction(&[types::Event::OBJECT_STORE], IdbTransactionMode::Readwrite)?;
         let event = match transaction.get_event_by_id(room_id, &event_id).await? {
             Some(mut inner) => inner.set_content(event),
-            None => types::Event::OutOfBand(OutOfBandEvent { content: event, position: () }),
+            None => types::Event::OutOfBand(OutOfBandEvent { room_id: room_id.to_owned(), content: event, position: () }),
         };
-        transaction.put_item(room_id, &event).await?;
+        transaction.put_item(&event).await?;
         transaction.commit().await?;
         Ok(())
     }
