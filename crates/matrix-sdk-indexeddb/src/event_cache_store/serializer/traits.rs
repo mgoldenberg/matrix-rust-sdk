@@ -125,9 +125,9 @@ pub trait IndexedKeyComponentBounds<T: Indexed>: IndexedKeyBounds<T> {
 }
 
 pub trait IndexedPrefixKeyBounds<T: Indexed, P>: IndexedKey<T> {
-    fn lower_key_with_prefix(prefix: &P, serializer: &IndexeddbSerializer) -> Self;
+    fn lower_key_with_prefix(prefix: P, serializer: &IndexeddbSerializer) -> Self;
 
-    fn upper_key_with_prefix(prefix: &P, serializer: &IndexeddbSerializer) -> Self;
+    fn upper_key_with_prefix(prefix: P, serializer: &IndexeddbSerializer) -> Self;
 }
 
 impl<T, K, P> IndexedPrefixKeyBounds<T, P> for K
@@ -135,16 +135,16 @@ where
     T: Indexed,
     K: IndexedPrefixKeyComponentBounds<T, P> + Sized,
 {
-    fn lower_key_with_prefix(prefix: &P, serializer: &IndexeddbSerializer) -> Self {
+    fn lower_key_with_prefix(prefix: P, serializer: &IndexeddbSerializer) -> Self {
         <Self as IndexedKey<T>>::encode(&Self::lower_key_components_with_prefix(prefix), serializer)
     }
 
-    fn upper_key_with_prefix(prefix: &P, serializer: &IndexeddbSerializer) -> Self {
+    fn upper_key_with_prefix(prefix: P, serializer: &IndexeddbSerializer) -> Self {
         <Self as IndexedKey<T>>::encode(&Self::upper_key_components_with_prefix(prefix), serializer)
     }
 }
 
 pub trait IndexedPrefixKeyComponentBounds<T: Indexed, P>: IndexedKey<T> {
-    fn lower_key_components_with_prefix(prefix: &P) -> Self::KeyComponents;
-    fn upper_key_components_with_prefix(prefix: &P) -> Self::KeyComponents;
+    fn lower_key_components_with_prefix(prefix: P) -> Self::KeyComponents;
+    fn upper_key_components_with_prefix(prefix: P) -> Self::KeyComponents;
 }

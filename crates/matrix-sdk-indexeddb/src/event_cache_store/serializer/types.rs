@@ -118,13 +118,14 @@ impl<K> IndexedKeyRange<K> {
         IndexedKeyRange::Bound(K::lower_key(serializer), K::upper_key(serializer))
     }
 
-    pub fn all_with_prefix<T, P>(prefix: &P, serializer: &IndexeddbSerializer) -> IndexedKeyRange<K>
+    pub fn all_with_prefix<T, P>(prefix: P, serializer: &IndexeddbSerializer) -> IndexedKeyRange<K>
     where
         T: Indexed,
         K: IndexedPrefixKeyBounds<T, P>,
+        P: Clone,
     {
         IndexedKeyRange::Bound(
-            K::lower_key_with_prefix(prefix, serializer),
+            K::lower_key_with_prefix(prefix.clone(), serializer),
             K::upper_key_with_prefix(prefix, serializer),
         )
     }
@@ -270,13 +271,13 @@ impl IndexedKey<Chunk> for IndexedChunkIdKey {
     }
 }
 
-impl IndexedPrefixKeyComponentBounds<Chunk, OwnedRoomId> for IndexedChunkIdKey {
-    fn lower_key_components_with_prefix(room_id: &OwnedRoomId) -> Self::KeyComponents {
-        (room_id.clone(), ChunkIdentifier::new(0))
+impl IndexedPrefixKeyComponentBounds<Chunk, &RoomId> for IndexedChunkIdKey {
+    fn lower_key_components_with_prefix(room_id: &RoomId) -> Self::KeyComponents {
+        (room_id.to_owned(), ChunkIdentifier::new(0))
     }
 
-    fn upper_key_components_with_prefix(room_id: &OwnedRoomId) -> Self::KeyComponents {
-        (room_id.clone(), ChunkIdentifier::new(js_sys::Number::MAX_SAFE_INTEGER as u64))
+    fn upper_key_components_with_prefix(room_id: &RoomId) -> Self::KeyComponents {
+        (room_id.to_owned(), ChunkIdentifier::new(js_sys::Number::MAX_SAFE_INTEGER as u64))
     }
 }
 
@@ -337,13 +338,13 @@ impl IndexedKey<Chunk> for IndexedNextChunkIdKey {
     }
 }
 
-impl IndexedPrefixKeyComponentBounds<Chunk, OwnedRoomId> for IndexedNextChunkIdKey {
-    fn lower_key_components_with_prefix(room_id: &OwnedRoomId) -> Self::KeyComponents {
-        (room_id.clone(), None)
+impl IndexedPrefixKeyComponentBounds<Chunk, &RoomId> for IndexedNextChunkIdKey {
+    fn lower_key_components_with_prefix(room_id: &RoomId) -> Self::KeyComponents {
+        (room_id.to_owned(), None)
     }
 
-    fn upper_key_components_with_prefix(room_id: &OwnedRoomId) -> Self::KeyComponents {
-        (room_id.clone(), Some(ChunkIdentifier::new(js_sys::Number::MAX_SAFE_INTEGER as u64)))
+    fn upper_key_components_with_prefix(room_id: &RoomId) -> Self::KeyComponents {
+        (room_id.to_owned(), Some(ChunkIdentifier::new(js_sys::Number::MAX_SAFE_INTEGER as u64)))
     }
 }
 
@@ -424,17 +425,17 @@ impl IndexedKey<Event> for IndexedEventIdKey {
     }
 }
 
-impl IndexedPrefixKeyComponentBounds<Event, OwnedRoomId> for IndexedEventIdKey {
-    fn lower_key_components_with_prefix(room_id: &OwnedRoomId) -> Self::KeyComponents {
+impl IndexedPrefixKeyComponentBounds<Event, &RoomId> for IndexedEventIdKey {
+    fn lower_key_components_with_prefix(room_id: &RoomId) -> Self::KeyComponents {
         let event_id = OwnedEventId::try_from(format!("${INDEXED_KEY_LOWER_CHARACTER}"))
             .expect("valid event id");
-        (room_id.clone(), event_id)
+        (room_id.to_owned(), event_id)
     }
 
-    fn upper_key_components_with_prefix(room_id: &OwnedRoomId) -> Self::KeyComponents {
+    fn upper_key_components_with_prefix(room_id: &RoomId) -> Self::KeyComponents {
         let event_id = OwnedEventId::try_from(format!("${INDEXED_KEY_UPPER_CHARACTER}"))
             .expect("valid event id");
-        (room_id.clone(), event_id)
+        (room_id.to_owned(), event_id)
     }
 }
 
@@ -462,33 +463,34 @@ impl IndexedKey<Event> for IndexedEventPositionKey {
     }
 }
 
-impl IndexedPrefixKeyComponentBounds<Event, OwnedRoomId> for IndexedEventPositionKey {
-    fn lower_key_components_with_prefix(room_id: &OwnedRoomId) -> Self::KeyComponents {
-        let prefix = (room_id.to_owned(), ChunkIdentifier::new(0));
-        <Self as IndexedPrefixKeyComponentBounds<Event, (OwnedRoomId, ChunkIdentifier)>>::lower_key_components_with_prefix(&prefix)
+impl IndexedPrefixKeyComponentBounds<Event, &RoomId> for IndexedEventPositionKey {
+    fn lower_key_components_with_prefix(room_id: &RoomId) -> Self::KeyComponents {
+        let chunk_id = ChunkIdentifier::new(0);
+        let prefix = (room_id, &chunk_id);
+        <Self as IndexedPrefixKeyComponentBounds<Event, (&RoomId, &ChunkIdentifier)>>::lower_key_components_with_prefix(prefix)
     }
 
-    fn upper_key_components_with_prefix(room_id: &OwnedRoomId) -> Self::KeyComponents {
-        let prefix =
-            (room_id.to_owned(), ChunkIdentifier::new(js_sys::Number::MAX_SAFE_INTEGER as u64));
-        <Self as IndexedPrefixKeyComponentBounds<Event, (OwnedRoomId, ChunkIdentifier)>>::lower_key_components_with_prefix(&prefix)
+    fn upper_key_components_with_prefix(room_id: &RoomId) -> Self::KeyComponents {
+        let chunk_id = ChunkIdentifier::new(js_sys::Number::MAX_SAFE_INTEGER as u64);
+        let prefix = (room_id, &chunk_id);
+        <Self as IndexedPrefixKeyComponentBounds<Event, (&RoomId, &ChunkIdentifier)>>::lower_key_components_with_prefix(prefix)
     }
 }
 
-impl IndexedPrefixKeyComponentBounds<Event, (OwnedRoomId, ChunkIdentifier)>
+impl IndexedPrefixKeyComponentBounds<Event, (&RoomId, &ChunkIdentifier)>
     for IndexedEventPositionKey
 {
     fn lower_key_components_with_prefix(
-        (room_id, chunk_id): &(OwnedRoomId, ChunkIdentifier),
+        (room_id, chunk_id): (&RoomId, &ChunkIdentifier),
     ) -> Self::KeyComponents {
-        (room_id.clone(), Position { chunk_identifier: chunk_id.index(), index: 0 })
+        (room_id.to_owned(), Position { chunk_identifier: chunk_id.index(), index: 0 })
     }
 
     fn upper_key_components_with_prefix(
-        (room_id, chunk_id): &(OwnedRoomId, ChunkIdentifier),
+        (room_id, chunk_id): (&RoomId, &ChunkIdentifier),
     ) -> Self::KeyComponents {
         (
-            room_id.clone(),
+            room_id.to_owned(),
             Position {
                 chunk_identifier: chunk_id.index(),
                 index: js_sys::Number::MAX_SAFE_INTEGER as usize,
@@ -542,15 +544,15 @@ impl IndexedKey<Event> for IndexedEventRelationKey {
     }
 }
 
-impl IndexedPrefixKeyBounds<Event, OwnedRoomId> for IndexedEventRelationKey {
-    fn lower_key_with_prefix(room_id: &OwnedRoomId, serializer: &IndexeddbSerializer) -> Self {
+impl IndexedPrefixKeyBounds<Event, &RoomId> for IndexedEventRelationKey {
+    fn lower_key_with_prefix(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
         let room_id = serializer.encode_key_as_string(keys::ROOMS, room_id);
         let related_event_id = String::from(INDEXED_KEY_LOWER_CHARACTER);
         let relation_type = String::from(INDEXED_KEY_LOWER_CHARACTER);
         Self(room_id, related_event_id, relation_type)
     }
 
-    fn upper_key_with_prefix(room_id: &OwnedRoomId, serializer: &IndexeddbSerializer) -> Self {
+    fn upper_key_with_prefix(room_id: &RoomId, serializer: &IndexeddbSerializer) -> Self {
         let room_id = serializer.encode_key_as_string(keys::ROOMS, room_id);
         let related_event_id = String::from(INDEXED_KEY_UPPER_CHARACTER);
         let relation_type = String::from(INDEXED_KEY_UPPER_CHARACTER);
@@ -558,9 +560,9 @@ impl IndexedPrefixKeyBounds<Event, OwnedRoomId> for IndexedEventRelationKey {
     }
 }
 
-impl IndexedPrefixKeyBounds<Event, (OwnedRoomId, OwnedEventId)> for IndexedEventRelationKey {
+impl IndexedPrefixKeyBounds<Event, (&RoomId, &EventId)> for IndexedEventRelationKey {
     fn lower_key_with_prefix(
-        (room_id, related_event_id): &(OwnedRoomId, OwnedEventId),
+        (room_id, related_event_id): (&RoomId, &EventId),
         serializer: &IndexeddbSerializer,
     ) -> Self {
         let room_id = serializer.encode_key_as_string(keys::ROOMS, room_id);
@@ -571,7 +573,7 @@ impl IndexedPrefixKeyBounds<Event, (OwnedRoomId, OwnedEventId)> for IndexedEvent
     }
 
     fn upper_key_with_prefix(
-        (room_id, related_event_id): &(OwnedRoomId, OwnedEventId),
+        (room_id, related_event_id): (&RoomId, &EventId),
         serializer: &IndexeddbSerializer,
     ) -> Self {
         let room_id = serializer.encode_key_as_string(keys::ROOMS, room_id);
@@ -642,13 +644,17 @@ impl IndexedKey<Gap> for IndexedGapIdKey {
     }
 }
 
-impl IndexedPrefixKeyComponentBounds<Gap, OwnedRoomId> for IndexedGapIdKey {
-    fn lower_key_components_with_prefix(room_id: &OwnedRoomId) -> Self::KeyComponents {
-        <Self as IndexedPrefixKeyComponentBounds<Chunk, OwnedRoomId>>::lower_key_components_with_prefix(room_id)
+impl IndexedPrefixKeyComponentBounds<Gap, &RoomId> for IndexedGapIdKey {
+    fn lower_key_components_with_prefix(room_id: &RoomId) -> Self::KeyComponents {
+        <Self as IndexedPrefixKeyComponentBounds<Chunk, &RoomId>>::lower_key_components_with_prefix(
+            room_id,
+        )
     }
 
-    fn upper_key_components_with_prefix(room_id: &OwnedRoomId) -> Self::KeyComponents {
-        <Self as IndexedPrefixKeyComponentBounds<Chunk, OwnedRoomId>>::upper_key_components_with_prefix(room_id)
+    fn upper_key_components_with_prefix(room_id: &RoomId) -> Self::KeyComponents {
+        <Self as IndexedPrefixKeyComponentBounds<Chunk, &RoomId>>::upper_key_components_with_prefix(
+            room_id,
+        )
     }
 }
 

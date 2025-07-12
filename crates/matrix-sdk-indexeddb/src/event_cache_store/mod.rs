@@ -465,7 +465,7 @@ impl_event_cache_store! {
             }
             _ => {
                 for event in
-                    transaction.get_events_by_related_event(room_id, &event_id.to_owned()).await?
+                    transaction.get_events_by_related_event(room_id, event_id).await?
                 {
                     let position = event.position().map(Into::into);
                     related_events.push((event.into(), position));
