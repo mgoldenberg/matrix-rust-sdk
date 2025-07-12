@@ -70,24 +70,6 @@ impl IndexeddbEventCacheStoreSerializer {
         &self.inner
     }
 
-    pub fn serialize_value(
-        &self,
-        value: &impl Serialize,
-    ) -> Result<JsValue, IndexeddbEventCacheStoreSerializerError<IndexeddbSerializerError>> {
-        self.inner.serialize_value(value).map_err(IndexeddbEventCacheStoreSerializerError::Indexing)
-    }
-
-    /// Decode a value that was previously encoded with
-    /// [`Self::serialize_value`].
-    pub fn deserialize_value<T: DeserializeOwned>(
-        &self,
-        value: JsValue,
-    ) -> Result<T, IndexeddbEventCacheStoreSerializerError<IndexeddbSerializerError>> {
-        self.inner
-            .deserialize_value(value)
-            .map_err(IndexeddbEventCacheStoreSerializerError::Indexing)
-    }
-
     /// Encodes an key for a [`Indexed`] type.
     ///
     /// Note that the particular key which is encoded is defined by the type

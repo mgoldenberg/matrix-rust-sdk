@@ -161,18 +161,6 @@ impl<K> From<K> for IndexedKeyRange<K> {
     }
 }
 
-/// A type that wraps a (de)serialized value `value` and associates it
-/// with an identifier, `id`.
-///
-/// This is useful for (de)serializing values to/from an object store
-/// and ensuring that they are well-formed, as each of the object stores
-/// uses `id` as its key path.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct ValueWithId {
-    pub id: String,
-    pub value: MaybeEncrypted,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IndexedLease {
     pub id: IndexedLeaseIdKey,
@@ -534,20 +522,6 @@ pub type IndexedEventPositionIndex = usize;
 /// [1]: crate::event_cache_store::migrations::v1::create_events_object_store
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IndexedEventRelationKey(IndexedRoomId, IndexedEventId, IndexedRelationType);
-
-impl IndexedEventRelationKey {
-    pub fn set_related_event_id(
-        &self,
-        related_event_id: &OwnedEventId,
-        serializer: &IndexeddbSerializer,
-    ) -> Self {
-        let room_id = self.0.clone();
-        let related_event_id =
-            serializer.encode_key_as_string(keys::EVENTS_RELATION_RELATED_EVENTS, related_event_id);
-        let relation_type = self.2.clone();
-        Self(room_id, related_event_id, relation_type)
-    }
-}
 
 impl IndexedKey<Event> for IndexedEventRelationKey {
     const INDEX: Option<&'static str> = Some(keys::EVENTS_RELATION);
