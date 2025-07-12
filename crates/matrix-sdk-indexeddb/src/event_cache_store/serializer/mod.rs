@@ -92,7 +92,7 @@ impl IndexeddbEventCacheStoreSerializer {
     ///
     /// Note that the particular key which is encoded is defined by the type
     /// `K`.
-    pub fn encode_key<T, K>(&self, components: &K::KeyComponents) -> K
+    pub fn encode_key<T, K>(&self, components: K::KeyComponents<'_>) -> K
     where
         T: Indexed,
         K: IndexedKey<T>,
@@ -106,7 +106,7 @@ impl IndexeddbEventCacheStoreSerializer {
     /// `K`.
     pub fn encode_key_as_value<T, K>(
         &self,
-        components: &K::KeyComponents,
+        components: K::KeyComponents<'_>,
     ) -> Result<JsValue, serde_wasm_bindgen::Error>
     where
         T: Indexed,
@@ -142,12 +142,12 @@ impl IndexeddbEventCacheStoreSerializer {
     /// `K`.
     pub fn encode_key_component_range<'a, T, K>(
         &self,
-        range: impl Into<IndexedKeyRange<&'a K::KeyComponents>>,
+        range: impl Into<IndexedKeyRange<K::KeyComponents<'a>>>,
     ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error>
     where
         T: Indexed,
         K: IndexedKey<T> + Serialize,
-        K::KeyComponents: 'a,
+        K::KeyComponents<'a>: 'a,
     {
         let range = match range.into() {
             IndexedKeyRange::Only(components) => {

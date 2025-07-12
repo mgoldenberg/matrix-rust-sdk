@@ -136,14 +136,13 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     /// the given room.
     pub async fn get_items_by_key_components<'b, T, K>(
         &self,
-        range: impl Into<IndexedKeyRange<&'b K::KeyComponents>>,
+        range: impl Into<IndexedKeyRange<K::KeyComponents<'b>>>,
     ) -> Result<Vec<T>, IndexeddbEventCacheStoreTransactionError>
     where
-        T: Indexed,
+        T: Indexed + 'b,
         T::IndexedType: DeserializeOwned,
         T::Error: AsyncErrorDeps,
-        K: IndexedKey<T> + Serialize,
-        K::KeyComponents: 'b,
+        K: IndexedKey<T> + Serialize + 'b,
     {
         let range: IndexedKeyRange<K> = range.into().encoded(self.serializer.inner());
         self.get_items_by_key::<T, K>(range).await
@@ -188,15 +187,15 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
 
     /// Query IndexedDB for items that match the given key components in the
     /// given room. If more than one item is found, an error is returned.
-    pub async fn get_item_by_key_components<T, K>(
+    pub async fn get_item_by_key_components<'b, T, K>(
         &self,
-        components: &K::KeyComponents,
+        components: K::KeyComponents<'b>,
     ) -> Result<Option<T>, IndexeddbEventCacheStoreTransactionError>
     where
-        T: Indexed,
+        T: Indexed + 'b,
         T::IndexedType: DeserializeOwned,
         T::Error: AsyncErrorDeps,
-        K: IndexedKey<T> + Serialize,
+        K: IndexedKey<T> + Serialize + 'b,
     {
         let mut items = self.get_items_by_key_components::<T, K>(components).await?;
         if items.len() > 1 {
@@ -231,14 +230,13 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     /// components range in the given room.
     pub async fn get_items_count_by_key_components<'b, T, K>(
         &self,
-        range: impl Into<IndexedKeyRange<&'b K::KeyComponents>>,
+        range: impl Into<IndexedKeyRange<K::KeyComponents<'b>>>,
     ) -> Result<usize, IndexeddbEventCacheStoreTransactionError>
     where
-        T: Indexed,
+        T: Indexed + 'b,
         T::IndexedType: DeserializeOwned,
         T::Error: AsyncErrorDeps,
-        K: IndexedKey<T> + Serialize,
-        K::KeyComponents: 'b,
+        K: IndexedKey<T> + Serialize + 'b,
     {
         let range: IndexedKeyRange<K> = range.into().encoded(self.serializer.inner());
         self.get_items_count_by_key::<T, K>(range).await
@@ -365,12 +363,11 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     /// IndexedDB
     pub async fn delete_items_by_key_components<'b, T, K>(
         &self,
-        range: impl Into<IndexedKeyRange<&'b K::KeyComponents>>,
+        range: impl Into<IndexedKeyRange<K::KeyComponents<'b>>>,
     ) -> Result<(), IndexeddbEventCacheStoreTransactionError>
     where
-        T: Indexed,
-        K: IndexedKey<T> + Serialize,
-        K::KeyComponents: 'b,
+        T: Indexed + 'b,
+        K: IndexedKey<T> + Serialize + 'b,
     {
         let range: IndexedKeyRange<K> = range.into().encoded(self.serializer.inner());
         self.delete_items_by_key::<T, K>(range).await
@@ -394,13 +391,13 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
 
     /// Delete item that matches the given key components in the given room from
     /// IndexedDB
-    pub async fn delete_item_by_key_components<T, K>(
+    pub async fn delete_item_by_key_components<'b, T, K>(
         &self,
-        key: &K::KeyComponents,
+        key: K::KeyComponents<'b>,
     ) -> Result<(), IndexeddbEventCacheStoreTransactionError>
     where
-        T: Indexed,
-        K: IndexedKey<T> + Serialize,
+        T: Indexed + 'b,
+        K: IndexedKey<T> + Serialize + 'b,
     {
         self.delete_items_by_key_components::<T, K>(key).await
     }
@@ -409,7 +406,7 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
         &self,
         id: &str,
     ) -> Result<Option<Lease>, IndexeddbEventCacheStoreTransactionError> {
-        self.get_item_by_key_components::<Lease, IndexedLeaseIdKey>(&id.to_owned()).await
+        self.get_item_by_key_components::<Lease, IndexedLeaseIdKey>(id).await
     }
 
     pub async fn put_lease(
@@ -421,14 +418,14 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
 
     pub async fn get_chunks_by_id(
         &self,
-        range: impl Into<IndexedKeyRange<&(OwnedRoomId, ChunkIdentifier)>>,
+        range: impl Into<IndexedKeyRange<(&RoomId, ChunkIdentifier)>>,
     ) -> Result<Vec<Chunk>, IndexeddbEventCacheStoreTransactionError> {
         self.get_items_by_key_components::<Chunk, IndexedChunkIdKey>(range).await
     }
 
-    pub async fn delete_chunks_by_id<'b>(
+    pub async fn delete_chunks_by_id(
         &self,
-        range: impl Into<IndexedKeyRange<&'b (OwnedRoomId, ChunkIdentifier)>>,
+        range: impl Into<IndexedKeyRange<(&RoomId, ChunkIdentifier)>>,
     ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         self.delete_items_by_key_components::<Chunk, IndexedChunkIdKey>(range).await
     }
@@ -453,13 +450,9 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     pub async fn get_chunk_by_id(
         &self,
         room_id: &RoomId,
-        chunk_id: &ChunkIdentifier,
+        chunk_id: ChunkIdentifier,
     ) -> Result<Option<Chunk>, IndexeddbEventCacheStoreTransactionError> {
-        self.get_item_by_key_components::<Chunk, IndexedChunkIdKey>(&(
-            room_id.to_owned(),
-            chunk_id.to_owned(),
-        ))
-        .await
+        self.get_item_by_key_components::<Chunk, IndexedChunkIdKey>((room_id, chunk_id)).await
     }
 
     pub async fn get_max_chunk_by_id(
@@ -484,13 +477,13 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     pub async fn load_chunk_by_id(
         &self,
         room_id: &RoomId,
-        chunk_id: &ChunkIdentifier,
+        chunk_id: ChunkIdentifier,
     ) -> Result<Option<RawChunk<RawEvent, RawGap>>, IndexeddbEventCacheStoreTransactionError> {
         if let Some(chunk) = self.get_chunk_by_id(room_id, chunk_id).await? {
             let content = match chunk.chunk_type {
                 ChunkType::Event => {
                     let events = self
-                        .get_events_by_chunk(room_id, &ChunkIdentifier::new(chunk.identifier))
+                        .get_events_by_chunk(room_id, ChunkIdentifier::new(chunk.identifier))
                         .await?
                         .into_iter()
                         .map(RawEvent::from)
@@ -499,7 +492,7 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
                 }
                 ChunkType::Gap => {
                     let gap = self
-                        .get_gap_by_id(room_id, &ChunkIdentifier::new(chunk.identifier))
+                        .get_gap_by_id(room_id, ChunkIdentifier::new(chunk.identifier))
                         .await?
                         .ok_or(IndexeddbEventCacheStoreTransactionError::ItemNotFound)?;
                     ChunkContent::Gap(RawGap { prev_token: gap.prev_token })
@@ -527,7 +520,7 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
         if let Some(previous) = chunk.previous {
             let previous_identifier = ChunkIdentifier::new(previous);
             if let Some(mut previous_chunk) =
-                self.get_chunk_by_id(&chunk.room_id, &previous_identifier).await?
+                self.get_chunk_by_id(&chunk.room_id, previous_identifier).await?
             {
                 previous_chunk.next = Some(chunk.identifier);
                 self.put_item(&previous_chunk).await?;
@@ -536,7 +529,7 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
         if let Some(next) = chunk.next {
             let next_identifier = ChunkIdentifier::new(next);
             if let Some(mut next_chunk) =
-                self.get_chunk_by_id(&chunk.room_id, &next_identifier).await?
+                self.get_chunk_by_id(&chunk.room_id, next_identifier).await?
             {
                 next_chunk.previous = Some(chunk.identifier);
                 self.put_item(&next_chunk).await?;
@@ -552,13 +545,13 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     pub async fn delete_chunk_by_id(
         &self,
         room_id: &RoomId,
-        chunk_id: &ChunkIdentifier,
+        chunk_id: ChunkIdentifier,
     ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         if let Some(chunk) = self.get_chunk_by_id(room_id, chunk_id).await? {
             if let Some(previous) = chunk.previous {
                 let previous_identifier = ChunkIdentifier::new(previous);
                 if let Some(mut previous_chunk) =
-                    self.get_chunk_by_id(room_id, &previous_identifier).await?
+                    self.get_chunk_by_id(room_id, previous_identifier).await?
                 {
                     previous_chunk.next = chunk.next;
                     self.put_item(&previous_chunk).await?;
@@ -566,18 +559,14 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
             }
             if let Some(next) = chunk.next {
                 let next_identifier = ChunkIdentifier::new(next);
-                if let Some(mut next_chunk) =
-                    self.get_chunk_by_id(room_id, &next_identifier).await?
+                if let Some(mut next_chunk) = self.get_chunk_by_id(room_id, next_identifier).await?
                 {
                     next_chunk.previous = chunk.previous;
                     self.put_item(&next_chunk).await?;
                 }
             }
-            self.delete_item_by_key_components::<Chunk, IndexedChunkIdKey>(&(
-                room_id.to_owned(),
-                chunk_id.to_owned(),
-            ))
-            .await?;
+            self.delete_item_by_key_components::<Chunk, IndexedChunkIdKey>((room_id, chunk_id))
+                .await?;
             match chunk.chunk_type {
                 ChunkType::Event => {
                     self.delete_events_by_chunk(room_id, chunk_id).await?;
@@ -590,9 +579,9 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
         Ok(())
     }
 
-    pub async fn get_chunks_by_next_chunk_id(
+    pub async fn get_chunks_by_next_chunk_id<'b>(
         &self,
-        range: impl Into<IndexedKeyRange<&(OwnedRoomId, Option<ChunkIdentifier>)>>,
+        range: impl Into<IndexedKeyRange<(&'b RoomId, Option<ChunkIdentifier>)>>,
     ) -> Result<Vec<Chunk>, IndexeddbEventCacheStoreTransactionError> {
         self.get_items_by_key_components::<Chunk, IndexedNextChunkIdKey>(range).await
     }
@@ -600,21 +589,18 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     pub async fn get_chunk_by_next_chunk_id(
         &self,
         room_id: &RoomId,
-        next_chunk_id: &Option<ChunkIdentifier>,
+        next_chunk_id: Option<ChunkIdentifier>,
     ) -> Result<Option<Chunk>, IndexeddbEventCacheStoreTransactionError> {
-        self.get_item_by_key_components::<Chunk, IndexedNextChunkIdKey>(&(
-            room_id.to_owned(),
-            next_chunk_id.to_owned(),
-        ))
-        .await
+        self.get_item_by_key_components::<Chunk, IndexedNextChunkIdKey>((room_id, next_chunk_id))
+            .await
     }
 
     pub async fn get_event_by_id(
         &self,
         room_id: &RoomId,
-        event_id: &OwnedEventId,
+        event_id: &EventId,
     ) -> Result<Option<Event>, IndexeddbEventCacheStoreTransactionError> {
-        let key = self.serializer.encode_key(&(room_id.to_owned(), event_id.to_owned()));
+        let key = self.serializer.encode_key((room_id, event_id));
         self.get_item_by_key::<Event, IndexedEventIdKey>(key).await
     }
 
@@ -630,7 +616,7 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     /// room.
     pub async fn get_events_by_position(
         &self,
-        range: impl Into<IndexedKeyRange<&(OwnedRoomId, Position)>>,
+        range: impl Into<IndexedKeyRange<(&RoomId, Position)>>,
     ) -> Result<Vec<Event>, IndexeddbEventCacheStoreTransactionError> {
         self.get_items_by_key_components::<Event, IndexedEventPositionKey>(range).await
     }
@@ -638,20 +624,16 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     pub async fn get_event_by_position(
         &self,
         room_id: &RoomId,
-        position: &Position,
+        position: Position,
     ) -> Result<Option<Event>, IndexeddbEventCacheStoreTransactionError> {
-        self.get_item_by_key_components::<Event, IndexedEventPositionKey>(&(
-            room_id.to_owned(),
-            position.to_owned(),
-        ))
-        .await
+        self.get_item_by_key_components::<Event, IndexedEventPositionKey>((room_id, position)).await
     }
 
     /// Query IndexedDB for number of events in the given position range in the
     /// given room.
     pub async fn get_events_count_by_position(
         &self,
-        range: impl Into<IndexedKeyRange<&(OwnedRoomId, Position)>>,
+        range: impl Into<IndexedKeyRange<(&RoomId, Position)>>,
     ) -> Result<usize, IndexeddbEventCacheStoreTransactionError> {
         self.get_items_count_by_key_components::<Event, IndexedEventPositionKey>(range).await
     }
@@ -659,20 +641,16 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     pub async fn delete_event_by_id(
         &self,
         room_id: &RoomId,
-        event_id: &OwnedEventId,
+        event_id: &EventId,
     ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
-        self.delete_item_by_key_components::<Event, IndexedEventIdKey>(&(
-            room_id.to_owned(),
-            event_id.to_owned(),
-        ))
-        .await
+        self.delete_item_by_key_components::<Event, IndexedEventIdKey>((room_id, event_id)).await
     }
 
     /// Query IndexedDB for events in the given chunk in the given room.
     pub async fn get_events_by_chunk(
         &self,
         room_id: &RoomId,
-        chunk_id: &ChunkIdentifier,
+        chunk_id: ChunkIdentifier,
     ) -> Result<Vec<Event>, IndexeddbEventCacheStoreTransactionError> {
         let range = IndexedKeyRange::all_with_prefix((room_id, chunk_id), self.serializer.inner());
         self.get_items_by_key::<Event, IndexedEventPositionKey>(range).await
@@ -683,7 +661,7 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     pub async fn get_events_count_by_chunk(
         &self,
         room_id: &RoomId,
-        chunk_id: &ChunkIdentifier,
+        chunk_id: ChunkIdentifier,
     ) -> Result<usize, IndexeddbEventCacheStoreTransactionError> {
         let range = IndexedKeyRange::all_with_prefix((room_id, chunk_id), self.serializer.inner());
         self.get_items_count_by_key::<Event, IndexedEventPositionKey>(range).await
@@ -705,7 +683,7 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
             // As a workaround, if the event has a position, we delete it first and
             // then call `put_item`. This should be fine as it all happens within the
             // context of a single transaction.
-            self.delete_event_by_position(event.room_id(), &position).await?;
+            self.delete_event_by_position(event.room_id(), position).await?;
         }
         self.put_item(event).await
     }
@@ -713,7 +691,7 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     /// Delete events in the given position range in the given room
     pub async fn delete_events_by_position(
         &self,
-        range: impl Into<IndexedKeyRange<&(OwnedRoomId, Position)>>,
+        range: impl Into<IndexedKeyRange<(&RoomId, Position)>>,
     ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         self.delete_items_by_key_components::<Event, IndexedEventPositionKey>(range).await
     }
@@ -722,20 +700,17 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     pub async fn delete_event_by_position(
         &self,
         room_id: &RoomId,
-        position: &Position,
+        position: Position,
     ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
-        self.delete_item_by_key_components::<Event, IndexedEventPositionKey>(&(
-            room_id.to_owned(),
-            position.to_owned(),
-        ))
-        .await
+        self.delete_item_by_key_components::<Event, IndexedEventPositionKey>((room_id, position))
+            .await
     }
 
     /// Delete events in the given chunk in the given room
     pub async fn delete_events_by_chunk(
         &self,
         room_id: &RoomId,
-        chunk_id: &ChunkIdentifier,
+        chunk_id: ChunkIdentifier,
     ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
         let range = IndexedKeyRange::all_with_prefix((room_id, chunk_id), self.serializer.inner());
         self.delete_items_by_key::<Event, IndexedEventPositionKey>(range).await
@@ -744,12 +719,14 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     pub async fn get_events_by_chunk_from_index(
         &self,
         room_id: &RoomId,
-        position: &Position,
+        position: Position,
     ) -> Result<Vec<Event>, IndexeddbEventCacheStoreTransactionError> {
-        let lower = (room_id.to_owned(), position.to_owned());
-        let chunk_id = ChunkIdentifier::new(position.chunk_identifier);
-        let upper = IndexedEventPositionKey::upper_key_components_with_prefix((room_id, &chunk_id));
-        let range = IndexedKeyRange::Bound(&lower, &upper);
+        let lower = (room_id, position);
+        let upper = IndexedEventPositionKey::upper_key_components_with_prefix((
+            room_id,
+            ChunkIdentifier::new(position.chunk_identifier),
+        ));
+        let range = IndexedKeyRange::Bound(lower, upper);
         self.get_events_by_position(range).await
     }
 
@@ -758,18 +735,20 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     pub async fn delete_events_by_chunk_from_index(
         &self,
         room_id: &RoomId,
-        position: &Position,
+        position: Position,
     ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
-        let lower = (room_id.to_owned(), position.to_owned());
-        let chunk_id = ChunkIdentifier::new(position.chunk_identifier);
-        let upper = IndexedEventPositionKey::upper_key_components_with_prefix((room_id, &chunk_id));
-        let range = IndexedKeyRange::Bound(&lower, &upper);
+        let lower = (room_id, position);
+        let upper = IndexedEventPositionKey::upper_key_components_with_prefix((
+            room_id,
+            ChunkIdentifier::new(position.chunk_identifier),
+        ));
+        let range = IndexedKeyRange::Bound(lower, upper);
         self.delete_events_by_position(range).await
     }
 
     pub async fn get_events_by_relation(
         &self,
-        range: impl Into<IndexedKeyRange<&(OwnedRoomId, OwnedEventId, RelationType)>>,
+        range: impl Into<IndexedKeyRange<(&RoomId, &EventId, &RelationType)>>,
     ) -> Result<Vec<Event>, IndexeddbEventCacheStoreTransactionError> {
         let range = range.into().encoded(self.serializer.inner());
         self.get_items_by_key::<Event, IndexedEventRelationKey>(range).await
@@ -778,11 +757,9 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     pub async fn get_event_by_relation(
         &self,
         room_id: &RoomId,
-        (related_event_id, relation_type): &(OwnedEventId, RelationType),
+        (related_event_id, relation_type): (&EventId, &RelationType),
     ) -> Result<Option<Event>, IndexeddbEventCacheStoreTransactionError> {
-        let components =
-            (room_id.to_owned(), related_event_id.to_owned(), relation_type.to_owned());
-        let key = self.serializer.encode_key(&components);
+        let key = self.serializer.encode_key((room_id, related_event_id, relation_type));
         self.get_item_by_key::<Event, IndexedEventRelationKey>(key).await
     }
 
@@ -808,7 +785,7 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
 
     pub async fn get_gaps_by_id(
         &self,
-        range: impl Into<IndexedKeyRange<&(OwnedRoomId, ChunkIdentifier)>>,
+        range: impl Into<IndexedKeyRange<(&RoomId, ChunkIdentifier)>>,
     ) -> Result<Vec<Gap>, IndexeddbEventCacheStoreTransactionError> {
         self.get_items_by_key_components::<Gap, IndexedGapIdKey>(range).await
     }
@@ -817,26 +794,18 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     pub async fn get_gap_by_id(
         &self,
         room_id: &RoomId,
-        chunk_id: &ChunkIdentifier,
+        chunk_id: ChunkIdentifier,
     ) -> Result<Option<Gap>, IndexeddbEventCacheStoreTransactionError> {
-        self.get_item_by_key_components::<Gap, IndexedGapIdKey>(&(
-            room_id.to_owned(),
-            chunk_id.to_owned(),
-        ))
-        .await
+        self.get_item_by_key_components::<Gap, IndexedGapIdKey>((room_id, chunk_id)).await
     }
 
     /// Delete gap that matches the given chunk identifier in the given room
     pub async fn delete_gap_by_id(
         &self,
         room_id: &RoomId,
-        chunk_id: &ChunkIdentifier,
+        chunk_id: ChunkIdentifier,
     ) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
-        self.delete_item_by_key_components::<Gap, IndexedGapIdKey>(&(
-            room_id.to_owned(),
-            chunk_id.to_owned(),
-        ))
-        .await
+        self.delete_item_by_key_components::<Gap, IndexedGapIdKey>((room_id, chunk_id)).await
     }
 
     /// Delete all gaps in the given room
