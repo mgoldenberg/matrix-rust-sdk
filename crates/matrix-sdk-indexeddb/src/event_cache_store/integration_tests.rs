@@ -692,6 +692,38 @@ macro_rules! indexeddb_event_cache_store_integration_tests {
             }
 
             #[async_test]
+            async fn test_load_last_chunk() {
+                let store = get_event_cache_store().await.expect("Failed to get event cache store");
+                $crate::event_cache_store::integration_tests::test_load_last_chunk(store)
+                    .await
+            }
+        }
+    };
+}
+
+// This is copied from `matrix_sdk_base::event_cache::store::integration_tests`
+// for the time being, because the IndexedDB implementation of `EventCacheStore`
+// is being completed iteratively. So, we are only bringing over the tests
+// relevant to the implemented functions. At the moment, this includes the
+// following.
+//
+// - EventCacheStore::handle_linked_chunk_updates
+// - EventCacheStore::load_all_chunks
+//
+// When all functions are implemented, we can get rid of this macro and use the
+// one from `matrix_sdk_base`.
+#[macro_export]
+macro_rules! event_cache_store_integration_tests {
+    () => {
+        mod event_cache_store_integration_tests {
+            use matrix_sdk_base::event_cache::store::{
+                EventCacheStoreIntegrationTests, IntoEventCacheStore,
+            };
+            use matrix_sdk_test::async_test;
+
+            use super::get_event_cache_store;
+
+            #[async_test]
             async fn test_filter_duplicate_events_no_events() {
                 let store = get_event_cache_store().await.expect("Failed to get event cache store");
                 $crate::event_cache_store::integration_tests::test_filter_duplicate_events_no_events(store).await

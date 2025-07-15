@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased] - ReleaseDate
 
+## [0.13.0] - 2025-07-10
+
+### Security Fixes
+
+- Fix SQL injection vulnerability in `EventCache`
+  ([d0c0100](https://github.com/matrix-org/matrix-rust-sdk/commit/d0c01006e4808db5eb96ad5c496416f284d8bd3c), Moderate, [CVE-2025-53549](https://www.cve.org/CVERecord?id=CVE-2025-53549), [GHSA-275g-g844-73jh](https://github.com/matrix-org/matrix-rust-sdk/security/advisories/GHSA-275g-g844-73jh))
+
 ### Bug fixes
 
 - When joining a room via `Client::join_room_by_id()`, if the client has `enable_share_history_on_invite` enabled,
@@ -36,6 +43,11 @@ All notable changes to this project will be documented in this file.
 - [**breaking**]: `Client::unstable_features()` returns a `BTreeSet<FeatureFlag>`, containing only
   the features whose value was set to true in the response to the `/versions` endpoint.
   ([#5357](https://github.com/matrix-org/matrix-rust-sdk/pull/5357))
+- [**breaking**]: The family of `Room::can_user_*` methods has been removed. The
+  same functionality can be accessed using the `RoomPowerLevels::user_can_*`
+  family of methods. The `RoomPowerLevels` object can be accessed using the
+  `Room::power_levels()` method.
+  ([#5250](https://github.com/matrix-org/matrix-rust-sdk/pull/5250/))
 - `ClientServerCapabilities` has been renamed to `ClientServerInfo`. Alongside this,
   `Client::reset_server_info` is now `Client::reset_server_info` and `Client::fetch_server_capabilities`
   is now `Client::fetch_server_versions`, returning the server versions response directly.
