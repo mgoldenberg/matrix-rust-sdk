@@ -20,11 +20,11 @@ use base64::{
     Engine,
 };
 use gloo_utils::format::JsValueSerdeExt;
+use indexed_db_futures::KeyRange;
 use matrix_sdk_crypto::CryptoStoreError;
 use matrix_sdk_store_encryption::{EncryptedValueBase64, StoreCipher};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use wasm_bindgen::JsValue;
-use web_sys::IdbKeyRange;
 use zeroize::Zeroizing;
 
 use crate::safe_encode::SafeEncode;
@@ -123,11 +123,7 @@ impl IndexeddbSerializer {
         }
     }
 
-    pub fn encode_to_range<T>(
-        &self,
-        table_name: &str,
-        key: T,
-    ) -> Result<IdbKeyRange, IndexeddbSerializerError>
+    pub fn encode_to_range<T>(&self, table_name: &str, key: T) -> KeyRange<JsValue>
     where
         T: SafeEncode,
     {
@@ -135,11 +131,6 @@ impl IndexeddbSerializer {
             Some(cipher) => key.encode_to_range_secure(table_name, cipher),
             None => key.encode_to_range(),
         }
-        .map_err(|e| IndexeddbSerializerError::DomException {
-            code: 0,
-            name: "IdbKeyRangeMakeError".to_owned(),
-            message: e,
-        })
     }
 
     /// Encode the value for storage as a value in indexeddb.

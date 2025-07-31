@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use web_sys::DomException;
+use indexed_db_futures::error::OpenDbError;
 
 use crate::crypto_store::{migrations::do_schema_upgrade, Result};
 
 /// Perform the schema upgrade v11 to v12, just bumping the schema version
-pub(crate) async fn schema_bump(name: &str) -> Result<(), DomException> {
+pub(crate) async fn schema_bump(name: &str) -> Result<(), OpenDbError> {
     do_schema_upgrade(name, 12, |_, _| Ok(())).await
 }

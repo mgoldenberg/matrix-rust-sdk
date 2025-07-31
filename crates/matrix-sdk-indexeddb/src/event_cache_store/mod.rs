@@ -14,7 +14,7 @@
 
 #![allow(unused)]
 
-use indexed_db_futures::IdbDatabase;
+use indexed_db_futures::{database::Database, transaction::TransactionMode, Build};
 use matrix_sdk_base::{
     event_cache::{
         store::{
@@ -32,7 +32,6 @@ use matrix_sdk_base::{
 };
 use ruma::{events::relation::RelationType, EventId, MxcUri, OwnedEventId, RoomId};
 use tracing::{error, instrument, trace};
-use web_sys::IdbTransactionMode;
 
 use crate::event_cache_store::{
     migrations::current::keys,
@@ -61,7 +60,7 @@ pub use error::IndexeddbEventCacheStoreError;
 #[derive(Debug)]
 pub struct IndexeddbEventCacheStore {
     // A handle to the IndexedDB database
-    inner: IdbDatabase,
+    inner: Database,
     // A serializer with functionality tailored to `IndexeddbEventCacheStore`
     serializer: IndexeddbEventCacheStoreSerializer,
     // An in-memory store for providing temporary implementations for
@@ -85,10 +84,14 @@ impl IndexeddbEventCacheStore {
     pub fn transaction<'a>(
         &'a self,
         stores: &[&str],
-        mode: IdbTransactionMode,
+        mode: TransactionMode,
     ) -> Result<IndexeddbEventCacheStoreTransaction<'a>, IndexeddbEventCacheStoreError> {
         Ok(IndexeddbEventCacheStoreTransaction::new(
-            self.inner.transaction_on_multi_with_mode(stores, mode)?,
+            self.inner
+                .transaction(stores)
+                .with_mode(mode)
+                .build()
+                .map_err(IndexeddbEventCacheStoreTransactionError::from)?,
             &self.serializer,
         ))
     }
@@ -151,7 +154,7 @@ impl_event_cache_store! {
 
         let transaction = self.transaction(
             &[keys::LINKED_CHUNKS, keys::GAPS, keys::EVENTS],
-            IdbTransactionMode::Readwrite,
+            TransactionMode::Readwrite,
         )?;
 
         for update in updates {
@@ -204,7 +207,7 @@ impl_event_cache_store! {
 
                     for (i, item) in items.into_iter().enumerate() {
                         transaction
-                            .put_item(
+                            .put_event(
                                 room_id,
                                 &types::Event::InBand(InBandEvent {
                                     content: item,
@@ -276,7 +279,7 @@ impl_event_cache_store! {
 
         let transaction = self.transaction(
             &[keys::LINKED_CHUNKS, keys::GAPS, keys::EVENTS],
-            IdbTransactionMode::Readwrite,
+            TransactionMode::Readwrite,
         )?;
 
         let mut raw_chunks = Vec::new();
@@ -314,7 +317,7 @@ impl_event_cache_store! {
 
         let transaction = self.transaction(
             &[keys::LINKED_CHUNKS, keys::EVENTS, keys::GAPS],
-            IdbTransactionMode::Readwrite,
+            TransactionMode::Readwrite,
         )?;
 
         let mut raw_chunks = Vec::new();
@@ -346,7 +349,7 @@ impl_event_cache_store! {
         let room_id = linked_chunk_id.room_id();
         let transaction = self.transaction(
             &[keys::LINKED_CHUNKS, keys::EVENTS, keys::GAPS],
-            IdbTransactionMode::Readonly,
+            TransactionMode::Readonly,
         )?;
 
         if transaction.get_chunks_count_in_room(room_id).await? == 0 {
@@ -402,7 +405,7 @@ impl_event_cache_store! {
         let room_id = linked_chunk_id.room_id();
         let transaction = self.transaction(
             &[keys::LINKED_CHUNKS, keys::EVENTS, keys::GAPS],
-            IdbTransactionMode::Readonly,
+            TransactionMode::Readonly,
         )?;
         if let Some(chunk) = transaction.get_chunk_by_id(room_id, &before_chunk_identifier).await? {
             if let Some(previous_identifier) = chunk.previous {
@@ -419,7 +422,7 @@ impl_event_cache_store! {
 
         let transaction = self.transaction(
             &[keys::LINKED_CHUNKS, keys::EVENTS, keys::GAPS],
-            IdbTransactionMode::Readwrite,
+            TransactionMode::Readwrite,
         )?;
         transaction.clear::<types::Chunk>().await?;
         transaction.clear::<types::Event>().await?;
@@ -443,7 +446,7 @@ impl_event_cache_store! {
         let linked_chunk_id = linked_chunk_id.to_owned();
         let room_id = linked_chunk_id.room_id();
         let transaction =
-            self.transaction(&[keys::EVENTS], IdbTransactionMode::Readonly)?;
+            self.transaction(&[keys::EVENTS], TransactionMode::Readonly)?;
         let mut duplicated = Vec::new();
         for event_id in events {
             if let Some(types::Event::InBand(event)) =
@@ -464,7 +467,7 @@ impl_event_cache_store! {
         let _timer = timer!("method");
 
         let transaction =
-            self.transaction(&[keys::EVENTS], IdbTransactionMode::Readonly)?;
+            self.transaction(&[keys::EVENTS], TransactionMode::Readonly)?;
         transaction
             .get_event_by_id(room_id, &event_id.to_owned())
             .await
@@ -482,7 +485,7 @@ impl_event_cache_store! {
         let _timer = timer!("method");
 
         let transaction =
-            self.transaction(&[keys::EVENTS], IdbTransactionMode::Readonly)?;
+            self.transaction(&[keys::EVENTS], TransactionMode::Readonly)?;
 
         let mut related_events = Vec::new();
         match filters {
@@ -521,7 +524,7 @@ impl_event_cache_store! {
             return Ok(());
         };
         let transaction =
-            self.transaction(&[keys::EVENTS], IdbTransactionMode::Readwrite)?;
+            self.transaction(&[keys::EVENTS], TransactionMode::Readwrite)?;
         let event = match transaction.get_event_by_id(room_id, &event_id).await? {
             Some(mut inner) => inner.with_content(event),
             None => types::Event::OutOfBand(OutOfBandEvent { content: event, position: () }),

@@ -13,6 +13,7 @@
 // limitations under the License
 
 use gloo_utils::format::JsValueSerdeExt;
+use indexed_db_futures::KeyRange;
 use matrix_sdk_crypto::CryptoStoreError;
 use ruma::RoomId;
 use serde::{de::DeserializeOwned, Serialize};
@@ -103,21 +104,19 @@ impl IndexeddbEventCacheStoreSerializer {
         &self,
         room_id: &RoomId,
         range: impl Into<IndexedKeyRange<K>>,
-    ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error>
+    ) -> Result<KeyRange<K>, serde_wasm_bindgen::Error>
     where
         T: Indexed,
         K: IndexedKeyBounds<T> + Serialize,
     {
         use serde_wasm_bindgen::to_value;
         Ok(match range.into() {
-            IndexedKeyRange::Only(key) => IdbKeyRange::only(&to_value(&key)?)?,
-            IndexedKeyRange::Bound(lower, upper) => {
-                IdbKeyRange::bound(&to_value(&lower)?, &to_value(&upper)?)?
-            }
+            IndexedKeyRange::Only(key) => KeyRange::Only(key),
+            IndexedKeyRange::Bound(lower, upper) => KeyRange::Bound(lower, false, upper, false),
             IndexedKeyRange::All => {
-                let lower = to_value(&K::lower_key(room_id, &self.inner))?;
-                let upper = to_value(&K::upper_key(room_id, &self.inner))?;
-                IdbKeyRange::bound(&lower, &upper).expect("construct key range")
+                let lower = K::lower_key(room_id, &self.inner);
+                let upper = K::upper_key(room_id, &self.inner);
+                KeyRange::Bound(lower, false, upper, false)
             }
         })
     }
@@ -130,7 +129,7 @@ impl IndexeddbEventCacheStoreSerializer {
         &self,
         room_id: &RoomId,
         range: impl Into<IndexedKeyRange<&'a K::KeyComponents>>,
-    ) -> Result<IdbKeyRange, serde_wasm_bindgen::Error>
+    ) -> Result<KeyRange<K>, serde_wasm_bindgen::Error>
     where
         T: Indexed,
         K: IndexedKeyComponentBounds<T> + Serialize,

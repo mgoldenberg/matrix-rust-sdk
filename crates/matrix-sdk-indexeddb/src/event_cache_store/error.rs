@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
+use indexed_db_futures::{error::OpenDbError, internals::SystemRepr};
 use matrix_sdk_base::{
     event_cache::store::{EventCacheStore, EventCacheStoreError, MemoryStore},
     SendOutsideWasm, SyncOutsideWasm,
@@ -19,7 +20,9 @@ use matrix_sdk_base::{
 use serde::de::Error;
 use thiserror::Error;
 
-use crate::event_cache_store::transaction::IndexeddbEventCacheStoreTransactionError;
+use crate::{
+    event_cache_store::transaction::IndexeddbEventCacheStoreTransactionError, GenericError,
+};
 
 /// A trait that combines the necessary traits needed for asynchronous runtimes,
 /// but excludes them when running in a web environment - i.e., when
@@ -31,6 +34,8 @@ impl<T> AsyncErrorDeps for T where T: std::error::Error + SendOutsideWasm + Sync
 
 #[derive(Debug, Error)]
 pub enum IndexeddbEventCacheStoreError {
+    #[error("unable to open database: {0}")]
+    UnableToOpenDatabase(String),
     #[error("DomException {name} ({code}): {message}")]
     DomException { name: String, message: String, code: u16 },
     #[error("chunks contain disjoint lists")]
@@ -57,11 +62,24 @@ impl From<web_sys::DomException> for IndexeddbEventCacheStoreError {
     }
 }
 
+impl From<indexed_db_futures::error::OpenDbError> for IndexeddbEventCacheStoreError {
+    fn from(value: indexed_db_futures::error::OpenDbError) -> Self {
+        use indexed_db_futures::error::OpenDbError::*;
+        match value {
+            VersionZero | UnsupportedEnvironment | NullFactory => {
+                Self::UnableToOpenDatabase(value.to_string())
+            }
+            Base(e) => IndexeddbEventCacheStoreTransactionError::from(e).into(),
+        }
+    }
+}
+
 impl From<IndexeddbEventCacheStoreError> for EventCacheStoreError {
     fn from(value: IndexeddbEventCacheStoreError) -> Self {
         use IndexeddbEventCacheStoreError::*;
 
         match value {
+            UnableToOpenDatabase(e) => GenericError::from(e).into(),
             DomException { .. }
             | ChunksContainCycle
             | ChunksContainDisjointLists

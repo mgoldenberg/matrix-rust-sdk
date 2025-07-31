@@ -12,7 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
-use indexed_db_futures::{prelude::IdbTransaction, IdbQuerySource};
+use indexed_db_futures::{
+    cursor::{Cursor, CursorDirection},
+    internals::SystemRepr,
+    query_source::QuerySource,
+    transaction::{Transaction, TransactionMode},
+    BuildSerde,
+};
 use matrix_sdk_base::{
     event_cache::{store::EventCacheStoreError, Event as RawEvent, Gap as RawGap},
     linked_chunk::{ChunkContent, ChunkIdentifier, RawChunk},
@@ -23,19 +29,22 @@ use serde::{
     Serialize,
 };
 use thiserror::Error;
-use web_sys::IdbCursorDirection;
+use wasm_bindgen::JsValue;
 
-use crate::event_cache_store::{
-    error::AsyncErrorDeps,
-    serializer::{
-        traits::{Indexed, IndexedKey, IndexedKeyBounds, IndexedKeyComponentBounds},
-        types::{
-            IndexedChunkIdKey, IndexedEventIdKey, IndexedEventPositionKey, IndexedEventRelationKey,
-            IndexedGapIdKey, IndexedKeyRange, IndexedNextChunkIdKey,
+use crate::{
+    event_cache_store::{
+        error::AsyncErrorDeps,
+        serializer::{
+            traits::{Indexed, IndexedKey, IndexedKeyBounds, IndexedKeyComponentBounds},
+            types::{
+                IndexedChunkIdKey, IndexedEventIdKey, IndexedEventPositionKey,
+                IndexedEventRelationKey, IndexedGapIdKey, IndexedKeyRange, IndexedNextChunkIdKey,
+            },
+            IndexeddbEventCacheStoreSerializer,
         },
-        IndexeddbEventCacheStoreSerializer,
+        types::{Chunk, ChunkType, Event, Gap, Position},
     },
-    types::{Chunk, ChunkType, Event, Gap, Position},
+    GenericError,
 };
 
 #[derive(Debug, Error)]
@@ -48,6 +57,8 @@ pub enum IndexeddbEventCacheStoreTransactionError {
     ItemIsNotUnique,
     #[error("item not found")]
     ItemNotFound,
+    #[error("backend: {0}")]
+    Backend(Box<dyn AsyncErrorDeps>),
 }
 
 impl From<web_sys::DomException> for IndexeddbEventCacheStoreTransactionError {
@@ -62,6 +73,32 @@ impl From<serde_wasm_bindgen::Error> for IndexeddbEventCacheStoreTransactionErro
     }
 }
 
+impl From<indexed_db_futures::error::SerialisationError>
+    for IndexeddbEventCacheStoreTransactionError
+{
+    fn from(e: indexed_db_futures::error::SerialisationError) -> Self {
+        Self::Serialization(Box::new(serde_json::Error::custom(e.to_string())))
+    }
+}
+
+impl From<indexed_db_futures::error::JSError> for IndexeddbEventCacheStoreTransactionError {
+    fn from(value: indexed_db_futures::error::JSError) -> Self {
+        Self::Backend(Box::new(GenericError::from(value.to_string())))
+    }
+}
+
+impl From<indexed_db_futures::error::Error> for IndexeddbEventCacheStoreTransactionError {
+    fn from(value: indexed_db_futures::error::Error) -> Self {
+        use indexed_db_futures::error::Error;
+        match value {
+            Error::DomException(e) => e.into_sys().into(),
+            Error::Serialisation(e) => e.into(),
+            Error::MissingData(e) => Self::Backend(Box::new(e)),
+            Error::Unknown(e) => e.into(),
+        }
+    }
+}
+
 impl From<IndexeddbEventCacheStoreTransactionError> for EventCacheStoreError {
     fn from(value: IndexeddbEventCacheStoreTransactionError) -> Self {
         use IndexeddbEventCacheStoreTransactionError::*;
@@ -70,6 +107,7 @@ impl From<IndexeddbEventCacheStoreTransactionError> for EventCacheStoreError {
             DomException { .. } => Self::InvalidData { details: value.to_string() },
             Serialization(e) => Self::Serialization(serde_json::Error::custom(e.to_string())),
             ItemIsNotUnique | ItemNotFound => Self::InvalidData { details: value.to_string() },
+            Backend(e) => GenericError::from(e.to_string()).into(),
         }
     }
 }
@@ -78,26 +116,26 @@ impl From<IndexeddbEventCacheStoreTransactionError> for EventCacheStoreError {
 /// performing operations relevant to the IndexedDB implementation of
 /// [`EventCacheStore`](matrix_sdk_base::event_cache::store::EventCacheStore).
 pub struct IndexeddbEventCacheStoreTransaction<'a> {
-    transaction: IdbTransaction<'a>,
+    transaction: Transaction<'a>,
     serializer: &'a IndexeddbEventCacheStoreSerializer,
 }
 
 impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     pub fn new(
-        transaction: IdbTransaction<'a>,
+        transaction: Transaction<'a>,
         serializer: &'a IndexeddbEventCacheStoreSerializer,
     ) -> Self {
         Self { transaction, serializer }
     }
 
     /// Returns the underlying IndexedDB transaction.
-    pub fn into_inner(self) -> IdbTransaction<'a> {
+    pub fn into_inner(self) -> Transaction<'a> {
         self.transaction
     }
 
     /// Commit all operations tracked in this transaction to IndexedDB.
     pub async fn commit(self) -> Result<(), IndexeddbEventCacheStoreTransactionError> {
-        self.transaction.await.into_result().map_err(Into::into)
+        self.transaction.commit().await.map_err(Into::into)
     }
 
     /// Query IndexedDB for items that match the given key range in the given
@@ -113,16 +151,17 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
         T::Error: AsyncErrorDeps,
         K: IndexedKeyBounds<T> + Serialize,
     {
+        let range = range.into();
         let range = self.serializer.encode_key_range::<T, K>(room_id, range)?;
         let object_store = self.transaction.object_store(T::OBJECT_STORE)?;
         let array = if let Some(index) = K::INDEX {
-            object_store.index(index)?.get_all_with_key(&range)?.await?
+            object_store.index(index)?.get_all().with_query(range).serde()?.await?
         } else {
-            object_store.get_all_with_key(&range)?.await?
+            object_store.get_all().with_query(range).serde()?.await?
         };
-        let mut items = Vec::with_capacity(array.length() as usize);
+        let mut items = Vec::with_capacity(array.len());
         for value in array {
-            let item = self.serializer.deserialize(value).map_err(|e| {
+            let item = T::from_indexed(value?, self.serializer.inner()).map_err(|e| {
                 IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e))
             })?;
             items.push(item);
@@ -218,9 +257,9 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
         let range = self.serializer.encode_key_range::<T, K>(room_id, range)?;
         let object_store = self.transaction.object_store(T::OBJECT_STORE)?;
         let count = if let Some(index) = K::INDEX {
-            object_store.index(index)?.count_with_key(&range)?.await?
+            object_store.index(index)?.count().with_query(range).serde()?.await?
         } else {
-            object_store.count_with_key(&range)?.await?
+            object_store.count().with_query(range).serde()?.await?
         };
         Ok(count as usize)
     }
@@ -269,24 +308,29 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
         K: IndexedKey<T> + IndexedKeyBounds<T> + Serialize,
     {
         let range = self.serializer.encode_key_range::<T, K>(room_id, IndexedKeyRange::All)?;
-        let direction = IdbCursorDirection::Prev;
+        let direction = CursorDirection::Prev;
         let object_store = self.transaction.object_store(T::OBJECT_STORE)?;
         if let Some(index) = K::INDEX {
-            object_store
-                .index(index)?
-                .open_cursor_with_range_and_direction(&range, direction)?
-                .await?
-                .map(|cursor| self.serializer.deserialize(cursor.value()))
-                .transpose()
-                .map_err(|e| IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e)))
-        } else {
-            object_store
-                .open_cursor_with_range_and_direction(&range, direction)?
-                .await?
-                .map(|cursor| self.serializer.deserialize(cursor.value()))
-                .transpose()
-                .map_err(|e| IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e)))
+            let index = object_store.index(index)?;
+            if let Some(mut cursor) =
+                index.open_cursor().with_query(range).with_direction(direction).serde()?.await?
+            {
+                if let Some(record) = cursor.next_record_ser().await? {
+                    return T::from_indexed(record, self.serializer.inner()).map(Some).map_err(
+                        |e| IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e)),
+                    );
+                }
+            }
+        } else if let Some(mut cursor) =
+            object_store.open_cursor().with_query(range).with_direction(direction).serde()?.await?
+        {
+            if let Some(record) = cursor.next_record_ser().await? {
+                return T::from_indexed(record, self.serializer.inner()).map(Some).map_err(|e| {
+                    IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e))
+                });
+            }
         }
+        Ok(None)
     }
 
     /// Adds an item to the given room in the corresponding IndexedDB object
@@ -304,9 +348,9 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     {
         self.transaction
             .object_store(T::OBJECT_STORE)?
-            .add_val_owned(self.serializer.serialize(room_id, item).map_err(|e| {
+            .add(self.serializer.serialize(room_id, item).map_err(|e| {
                 IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e))
-            })?)?
+            })?)
             .await
             .map_err(Into::into)
     }
@@ -326,9 +370,9 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     {
         self.transaction
             .object_store(T::OBJECT_STORE)?
-            .put_val_owned(self.serializer.serialize(room_id, item).map_err(|e| {
+            .put(self.serializer.serialize(room_id, item).map_err(|e| {
                 IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e))
-            })?)?
+            })?)
             .await
             .map_err(Into::into)
     }
@@ -347,14 +391,16 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
         let object_store = self.transaction.object_store(T::OBJECT_STORE)?;
         if let Some(index) = K::INDEX {
             let index = object_store.index(index)?;
-            if let Some(cursor) = index.open_cursor_with_range(&range)?.await? {
-                while cursor.key().is_some() {
-                    cursor.delete()?.await?;
-                    cursor.continue_cursor()?.await?;
+            if let Some(mut cursor) = index.open_cursor().with_query(range).serde()?.await? {
+                loop {
+                    cursor.delete()?;
+                    if cursor.next_record::<JsValue>().await?.is_none() {
+                        break;
+                    }
                 }
             }
         } else {
-            object_store.delete_owned(&range)?.await?;
+            object_store.delete(range).serde()?.await?;
         }
         Ok(())
     }

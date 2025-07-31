@@ -1,7 +1,11 @@
 #![cfg_attr(not(target_family = "wasm"), allow(unused))]
 
+#[cfg(feature = "event-cache-store")]
+use matrix_sdk_base::event_cache::store::EventCacheStoreError;
 #[cfg(feature = "state-store")]
 use matrix_sdk_base::store::StoreError;
+#[cfg(feature = "e2e-encryption")]
+use matrix_sdk_crypto::CryptoStoreError;
 use thiserror::Error;
 
 #[cfg(feature = "e2e-encryption")]
@@ -74,4 +78,39 @@ pub enum OpenStoreError {
     #[cfg(feature = "e2e-encryption")]
     #[error(transparent)]
     Crypto(#[from] IndexeddbCryptoStoreError),
+}
+
+/// A wrapper around [`String`] that derives [`Error`](std::error::Error).
+/// This is useful when a particular error is not [`Send`] or [`Sync`] but
+/// must be mapped into a higher-level error that requires those constraints,
+/// e.g. [`StoreError::Backend`]
+#[derive(Debug, Error)]
+#[error("{0}")]
+struct GenericError(String);
+
+impl<S: AsRef<str>> From<S> for GenericError {
+    fn from(value: S) -> Self {
+        Self(value.as_ref().to_owned())
+    }
+}
+
+#[cfg(feature = "state-store")]
+impl From<GenericError> for StoreError {
+    fn from(value: GenericError) -> Self {
+        Self::backend(value)
+    }
+}
+
+#[cfg(feature = "e2e-encryption")]
+impl From<GenericError> for CryptoStoreError {
+    fn from(value: GenericError) -> Self {
+        Self::backend(value)
+    }
+}
+
+#[cfg(feature = "event-cache-store")]
+impl From<GenericError> for EventCacheStoreError {
+    fn from(value: GenericError) -> Self {
+        Self::backend(value)
+    }
 }

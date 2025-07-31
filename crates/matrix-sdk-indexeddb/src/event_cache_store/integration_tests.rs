@@ -421,12 +421,7 @@ pub async fn test_linked_chunk_update_is_a_transaction(store: IndexeddbEventCach
     let err = store.handle_linked_chunk_updates(linked_chunk_id, updates).await.unwrap_err();
 
     // The operation fails with a constraint violation error.
-    assert_matches!(
-        err,
-        IndexeddbEventCacheStoreError::Transaction(
-            IndexeddbEventCacheStoreTransactionError::DomException { .. }
-        )
-    );
+    assert_matches!(err, IndexeddbEventCacheStoreError::Transaction(_));
 
     // If the updates have been handled transactionally, then no new chunks should
     // have been added; failure of the second update leads to the first one being
