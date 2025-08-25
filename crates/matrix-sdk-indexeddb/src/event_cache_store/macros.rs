@@ -12,14 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
-// Small hack to have the following macro invocation act as the appropriate
-// trait impl block on wasm, but still be compiled on non-wasm as a regular
-// impl block otherwise.
+// This module contains a small hack to have the following macro invocations
+// act as the appropriate trait impl block on wasm, but still be compiled on
+// non-wasm as a regular impl block.
 //
 // The trait impl doesn't compile on non-wasm due to unfulfilled trait bounds,
-// this hack allows us to still have most of rust-analyzer's IDE functionality
-// within the impl block without having to set it up to check things against
-// the wasm target (which would disable many other parts of the codebase).
+// but this hack allows us to still have most of rust-analyzer's IDE
+// functionality within the impl block without having to set it up to check
+// things against the wasm target (which would disable many other parts of the
+// codebase).
+
 #[cfg(target_arch = "wasm32")]
 macro_rules! impl_event_cache_store {
     ( $($body:tt)* ) => {
@@ -41,4 +43,26 @@ macro_rules! impl_event_cache_store {
     };
 }
 
+#[cfg(target_arch = "wasm32")]
+macro_rules! impl_event_cache_store_media {
+    ( $($body:tt)* ) => {
+        #[async_trait::async_trait(?Send)]
+        impl EventCacheStoreMedia for IndexeddbEventCacheStore {
+            type Error = IndexeddbEventCacheStoreError;
+
+            $($body)*
+        }
+    };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! impl_event_cache_store_media {
+    ( $($body:tt)* ) => {
+        impl IndexeddbEventCacheStore {
+            $($body)*
+        }
+    };
+}
+
 pub(super) use impl_event_cache_store;
+pub(super) use impl_event_cache_store_media;
