@@ -43,7 +43,7 @@ use crate::event_cache_store::{
         },
         IndexeddbEventCacheStoreSerializer,
     },
-    types::{Chunk, ChunkType, Event, Gap, Lease, Position},
+    types::{Chunk, ChunkType, Event, Gap, Lease, Media, Position},
 };
 
 #[derive(Debug, Error)]
@@ -354,6 +354,30 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
             .map_err(Into::into)
     }
 
+    /// Adds an item to the corresponding IndexedDB object
+    /// store, i.e., `T::OBJECT_STORE`, if `T::IndexedType` meets the criteria
+    /// defined by `f`. If an item with the same key already exists, it will
+    /// be rejected.
+    pub async fn add_item_if<T>(
+        &self,
+        item: &T,
+        f: impl Fn(&T::IndexedType) -> bool,
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError>
+    where
+        T: Indexed + Serialize,
+        T::IndexedType: Serialize,
+        T::Error: AsyncErrorDeps,
+    {
+        let option = self
+            .serializer
+            .serialize_if(item, f)
+            .map_err(|e| IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e)))?;
+        if let Some(value) = option {
+            self.transaction.object_store(T::OBJECT_STORE)?.add_val_owned(value)?.await?;
+        }
+        Ok(())
+    }
+
     /// Puts an item in the corresponding IndexedDB object
     /// store, i.e., `T::OBJECT_STORE`. If an item with the same key already
     /// exists, it will be overwritten.
@@ -373,6 +397,30 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
             })?)?
             .await
             .map_err(Into::into)
+    }
+
+    /// Puts an item in the corresponding IndexedDB object
+    /// store, i.e., `T::OBJECT_STORE`, if `T::IndexedType` meets the criteria
+    /// defined by `f`. If an item with the same key already
+    /// exists, it will be overwritten.
+    pub async fn put_item_if<T>(
+        &self,
+        item: &T,
+        f: impl Fn(&T::IndexedType) -> bool,
+    ) -> Result<(), IndexeddbEventCacheStoreTransactionError>
+    where
+        T: Indexed + Serialize,
+        T::IndexedType: Serialize,
+        T::Error: AsyncErrorDeps,
+    {
+        let option = self
+            .serializer
+            .serialize_if(item, f)
+            .map_err(|e| IndexeddbEventCacheStoreTransactionError::Serialization(Box::new(e)))?;
+        if let Some(value) = option {
+            self.transaction.object_store(T::OBJECT_STORE)?.put_val_owned(value)?.await?;
+        }
+        Ok(())
     }
 
     /// Delete items in given key range from IndexedDB
