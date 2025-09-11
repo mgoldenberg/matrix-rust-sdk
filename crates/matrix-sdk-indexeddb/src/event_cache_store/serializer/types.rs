@@ -37,7 +37,7 @@ use matrix_sdk_base::{
 use matrix_sdk_crypto::CryptoStoreError;
 use ruma::{
     events::{relation::RelationType, room::MediaSource},
-    EventId, OwnedEventId, RoomId,
+    EventId, MxcUri, OwnedEventId, RoomId,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -947,9 +947,9 @@ impl IndexedKey<MediaRetentionPolicy> for IndexedCoreIdKey {
 pub struct IndexedMedia {
     /// The primary key of the object store
     pub id: IndexedMediaIdKey,
-    /// The (possibly) hashed source of the media derived from
-    /// [`MediaSource::unique_key`]
-    pub source: IndexedMediaSourceKey,
+    /// The (possibly) hashed [`MxcUri`] of the media derived from
+    /// [`MediaRequestParameters::uri`]
+    pub uri: IndexedMediaUriKey,
     /// The size (in bytes) of the media content and whether to ignore the
     /// [`MediaRetentionPolicy`]
     pub content_size: IndexedMediaContentSizeKey,
@@ -993,8 +993,8 @@ impl Indexed for Media {
                 &self.metadata.request_parameters,
                 serializer,
             ),
-            source: <IndexedMediaSourceKey as IndexedKey<Self>>::encode(
-                &self.metadata.request_parameters.source,
+            uri: <IndexedMediaUriKey as IndexedKey<Self>>::encode(
+                self.metadata.request_parameters.uri(),
                 serializer,
             ),
             content_size: IndexedMediaContentSizeKey::encode(
@@ -1042,20 +1042,23 @@ impl IndexedKey<Media> for IndexedMediaIdKey {
     }
 }
 
-/// The value associated with the [`source`](IndexedMedia::source) index of the
+/// The value associated with the [`uri`](IndexedMedia::uri) index of the
 /// [`MEDIA`][1] object store, which is constructed from:
 ///
-/// - The (possibly) hashed value returned by [`MediaSource::unique_key`]
+/// - The (possibly) hashed [`MxcUri`] returned by
+///   [`MediaRequestParameters::uri`]
 ///
 /// [1]: crate::event_cache_store::migrations::v1::create_media_object_store
 #[derive(Debug, Serialize, Deserialize)]
-pub struct IndexedMediaSourceKey(String);
+pub struct IndexedMediaUriKey(String);
 
-impl IndexedKey<Media> for IndexedMediaSourceKey {
-    type KeyComponents<'a> = &'a MediaSource;
+impl IndexedKey<Media> for IndexedMediaUriKey {
+    const INDEX: Option<&'static str> = Some(keys::MEDIA_URI);
+
+    type KeyComponents<'a> = &'a MxcUri;
 
     fn encode(components: Self::KeyComponents<'_>, serializer: &IndexeddbSerializer) -> Self {
-        Self(serializer.encode_key_as_string(keys::MEDIA_SOURCE, components.unique_key()))
+        Self(serializer.encode_key_as_string(keys::MEDIA_URI, components))
     }
 }
 
