@@ -20,7 +20,10 @@ use matrix_sdk_base::{
     linked_chunk::{ChunkIdentifier, LinkedChunkId, OwnedLinkedChunkId},
     media::MediaRequestParameters,
 };
-use ruma::{OwnedEventId, OwnedRoomId, RoomId};
+use ruma::{
+    time::{SystemTime, UNIX_EPOCH},
+    OwnedEventId, OwnedRoomId, RoomId,
+};
 use serde::{Deserialize, Serialize};
 
 /// Representation of a time-based lock on the entire
@@ -245,4 +248,30 @@ pub struct MediaMetadata {
     /// [1]: matrix_sdk_base::event_cache::store::media::MediaRetentionPolicy
     #[serde(with = "crate::event_cache_store::serializer::foreign::ignore_media_retention_policy")]
     pub ignore_policy: IgnoreMediaRetentionPolicy,
+}
+
+/// A representation of time relative to the [`UNIX_EPOCH`].
+///
+/// Typically a type of this nature is represented as a [`Duration`],
+/// but the conversion from a [`SystemTime`] to a [`Duration`] is
+/// fallible (see [`SystemTime::duration_since`]). The benefit of this
+/// type is that it can provide an infallible conversion, excepting
+/// overflows.
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub enum UnixTime {
+    /// A representation of a point in time before the [`UNIX_EPOCH`], which is
+    /// quantified by the nested [`Duration`]
+    BeforeEpoch(Duration),
+    /// A representation of a point in time after the [`UNIX_EPOCH`], which is
+    /// quantified by the nested [`Duration`]
+    AfterEpoch(Duration),
+}
+
+impl From<SystemTime> for UnixTime {
+    fn from(value: SystemTime) -> Self {
+        match value.duration_since(UNIX_EPOCH) {
+            Ok(duration) => Self::AfterEpoch(duration),
+            Err(e) => Self::BeforeEpoch(e.duration()),
+        }
+    }
 }
