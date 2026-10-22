@@ -433,6 +433,29 @@ impl<'a> Transaction<'a> {
         }
     }
 
+    /// Update items in the given key range by reading them, applying the
+    /// function `F`, and then writing them back to IndexedDB.
+    ///
+    /// Note that this is a potentially expensive operation, as IndexedDB does
+    /// not provide modification utilities.
+    pub async fn update_items_by_key<'b, T, K, F>(
+        &self,
+        range: impl Into<IndexedKeyRange<K>>,
+        f: F,
+    ) -> Result<(), TransactionError>
+    where
+        T: Indexed + Serialize + 'b,
+        T::IndexedType: Serialize + DeserializeOwned,
+        T::Error: AsyncErrorDeps,
+        K: IndexedKey<T> + Serialize + 'b,
+        F: Fn(T) -> T,
+    {
+        for item in self.get_items_by_key::<T, K>(range).await? {
+            self.put_item(&f(item))?;
+        }
+        Ok(())
+    }
+
     /// Update items in the given key component range by reading them, applying
     /// the function `F`, and then writing them back to IndexedDB.
     ///

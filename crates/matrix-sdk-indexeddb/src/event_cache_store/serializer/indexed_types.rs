@@ -46,8 +46,8 @@ use crate::{
     serializer::{
         indexed_type::{
             constants::{
-                INDEXED_KEY_LOWER_CHARACTER, INDEXED_KEY_LOWER_STRING, INDEXED_KEY_UPPER_CHARACTER,
-                INDEXED_KEY_UPPER_STRING,
+                INDEXED_KEY_LOWER_BYTES, INDEXED_KEY_LOWER_CHARACTER, INDEXED_KEY_LOWER_STRING,
+                INDEXED_KEY_UPPER_CHARACTER, INDEXED_KEY_UPPER_STRING,
             },
             traits::{
                 Indexed, IndexedKey, IndexedKeyComponentBounds, IndexedPrefixKeyBounds,
@@ -377,7 +377,10 @@ impl Indexed for Event {
         });
         Ok(IndexedEvent {
             id,
-            event_id: IndexedEventEventIdKey::encode(event_id, serializer),
+            event_id: IndexedEventEventIdKey::encode(
+                (event_id, self.linked_chunk_id()),
+                serializer,
+            ),
             room,
             position,
             out_of_band,
@@ -442,19 +445,62 @@ impl IndexedPrefixKeyBounds<Event, LinkedChunkId<'_>> for IndexedEventIdKey {
 /// the [`EVENTS`][1] object store, which is constructed from:
 ///
 /// - The (possibly) hashed Event ID.
+/// - The (possibly) hashed Linked Chunk ID.
 ///
 /// [1]: crate::event_cache_store::migrations::v7::add_event_id_index_to_events_object_store
-#[derive(Debug, Serialize, Deserialize)]
-pub struct IndexedEventEventIdKey(IndexedEventId);
+#[derive(Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct IndexedEventEventIdKey(IndexedEventId, IndexedLinkedChunkId);
 
 impl IndexedKey<Event> for IndexedEventEventIdKey {
     const INDEX: Option<&'static str> = Some(keys::EVENTS_EVENT_ID);
 
-    type KeyComponents<'a> = &'a EventId;
+    type KeyComponents<'a> = (&'a EventId, LinkedChunkId<'a>);
 
-    fn encode(event_id: Self::KeyComponents<'_>, serializer: &SafeEncodeSerializer) -> Self {
+    fn encode(
+        (event_id, linked_chunk_id): Self::KeyComponents<'_>,
+        serializer: &SafeEncodeSerializer,
+    ) -> Self {
         let event_id = serializer.encode_key_as_string(keys::EVENTS, event_id);
-        Self(event_id)
+        let linked_chunk_id =
+            serializer.hash_key(keys::LINKED_CHUNK_IDS, linked_chunk_id.storage_key());
+        Self(event_id, linked_chunk_id)
+    }
+}
+
+impl IndexedPrefixKeyBounds<Event, &EventId> for IndexedEventEventIdKey {
+    fn lower_key_with_prefix(event_id: &EventId, serializer: &SafeEncodeSerializer) -> Self {
+        let event_id = serializer.encode_key_as_string(keys::EVENTS, event_id);
+        Self(event_id, INDEXED_KEY_LOWER_BYTES)
+    }
+
+    fn upper_key_with_prefix(event_id: &EventId, serializer: &SafeEncodeSerializer) -> Self {
+        // We cannot provide an upper bound on [`IndexedLinkedChunkId`] as
+        // there is no upper bound on a [`Vec<u8>`]. Instead, we construct the
+        // lowest possible key with the nearest larger prefix.
+        //
+        // For example, consider the provided [`EventId`] is "$a". We might
+        // construct an upper key by providing a large [`Vec<u8>`].
+        //
+        //     ("$a", [255, 255, 255, ...])
+        //
+        // But the [`Vec<u8>`] could always be made larger by appending another
+        // [`u8`], so some values with "$a" as their prefix may be
+        // larger than the provided bound. Instead, we construct the
+        // upper key by constructing the next larger [`EventId`] and the
+        // lowest possible [`Vec<u8>`].
+        //
+        //     ("$a\0", [])
+        //
+        // Note that this upper bound will capture all intended values so long
+        // as either of the following conditions is true.
+        //
+        //     1. A valid [`EventId`] never contains "\0"
+        //     2. [`LinkedChunkId::storage_key`] never returns an empty [`impl
+        //        AsRef<[u8]>`]
+        //
+        let mut event_id = serializer.encode_key_as_string(keys::EVENTS, event_id);
+        event_id.push(char::MIN);
+        Self(event_id, INDEXED_KEY_LOWER_BYTES)
     }
 }
 

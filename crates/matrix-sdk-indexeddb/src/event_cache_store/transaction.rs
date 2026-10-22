@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License
 
-use std::ops::Deref;
+use std::{collections::HashSet, ops::Deref};
 
 use indexed_db_futures::transaction as inner;
 use matrix_sdk_base::{
@@ -340,16 +340,6 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
         self.get_item_by_key::<Event, IndexedEventIdKey>(key).await
     }
 
-    /// Query IndexedDB for events that match the given event id across all
-    /// linked chunks.
-    pub async fn get_events_by_event_id(
-        &self,
-        event_id: &EventId,
-    ) -> Result<Vec<Event>, TransactionError> {
-        let key = self.serializer().encode_key::<_, IndexedEventEventIdKey>(event_id);
-        self.get_items_by_key::<Event, IndexedEventEventIdKey>(key).await
-    }
-
     /// Query IndexedDB for events that match the given event id in the given
     /// room. If more than one item is found, an error is returned.
     pub async fn get_event_by_room(
@@ -466,9 +456,11 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
             && self.contains_out_of_band_event(event.linked_chunk_id(), event_id).await?;
         let indexed = if promote { self.put_item(event)? } else { self.add_item(event)? };
 
-        self.update_events_by_event_id(event_id, |existing| {
-            existing.with_content(event.content().clone())
-        })
+        self.update_events_by_event_id_excluding(
+            &[event.linked_chunk_id()],
+            event_id,
+            |existing| existing.with_content(event.content().clone()),
+        )
         .await?;
 
         Ok(indexed)
@@ -489,9 +481,11 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
 
         let indexed = self.put_item(event)?;
 
-        self.update_events_by_event_id(event_id, |existing| {
-            existing.with_content(event.content().clone())
-        })
+        self.update_events_by_event_id_excluding(
+            &[event.linked_chunk_id()],
+            event_id,
+            |existing| existing.with_content(event.content().clone()),
+        )
         .await?;
 
         Ok(indexed)
@@ -508,7 +502,34 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
         event_id: &EventId,
         f: F,
     ) -> Result<(), TransactionError> {
-        self.update_items_by_key_components::<Event, IndexedEventEventIdKey, F>(event_id, f).await
+        let range = IndexedKeyRange::all_with_prefix(event_id, self.serializer().inner());
+        self.update_items_by_key::<Event, IndexedEventEventIdKey, F>(range, f).await
+    }
+
+    /// Same as [`Self::update_events_by_event_id`], but does not update events
+    /// associated with the provided [`LinkedChunkId`]s in `exclude`.
+    pub async fn update_events_by_event_id_excluding<F: Copy + Fn(Event) -> Event>(
+        &self,
+        exclude: &[LinkedChunkId<'_>],
+        event_id: &EventId,
+        f: F,
+    ) -> Result<(), TransactionError> {
+        let range = IndexedKeyRange::all_with_prefix(event_id, self.serializer().inner());
+        let keys = self.get_keys::<_, IndexedEventEventIdKey>(range).await?;
+
+        if !keys.is_empty() {
+            let exclude = exclude
+                .iter()
+                .map(|linked_chunk_id| self.serializer().encode_key((event_id, *linked_chunk_id)))
+                .collect::<HashSet<IndexedEventEventIdKey>>();
+            let keys = keys.into_iter().filter(|key| !exclude.contains(key)).collect::<Vec<_>>();
+
+            for key in keys {
+                self.update_items_by_key::<Event, IndexedEventEventIdKey, F>(key, f).await?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Update events in the given position range matching the given linked

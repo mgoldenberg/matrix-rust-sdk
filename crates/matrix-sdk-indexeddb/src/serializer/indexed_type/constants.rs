@@ -42,6 +42,15 @@ pub static INDEXED_KEY_LOWER_STRING: LazyLock<String> =
 pub static INDEXED_KEY_UPPER_STRING: LazyLock<String> =
     LazyLock::new(|| String::from(INDEXED_KEY_UPPER_CHARACTER));
 
+/// The minimum possible [`Vec<u8>`] - i.e., an empty [`Vec`] with no contents.
+///
+/// This value is useful for constructing a key range, but note that there is no
+/// maximum possible value for a [`Vec<u8>`]. This is because for any
+/// [`Vec<u8>`], one can construct another [`Vec<u8>`] with a larger
+/// lexicographical ordinal value by simply pushing another [`u8`] onto the end
+/// of the original [`Vec`].
+pub const INDEXED_KEY_LOWER_BYTES: Vec<u8> = Vec::new();
+
 /// The minimum possible [`u64`].
 ///
 /// This value is useful for constructing a key range over all keys which
