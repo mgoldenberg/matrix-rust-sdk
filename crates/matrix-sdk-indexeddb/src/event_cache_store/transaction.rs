@@ -508,25 +508,33 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
 
     /// Same as [`Self::update_events_by_event_id`], but does not update events
     /// associated with the provided [`LinkedChunkId`]s in `exclude`.
-    pub async fn update_events_by_event_id_excluding<F: Copy + Fn(Event) -> Event>(
+    pub async fn update_events_by_event_id_excluding<F>(
         &self,
         exclude: &[LinkedChunkId<'_>],
         event_id: &EventId,
         f: F,
-    ) -> Result<(), TransactionError> {
-        let range = IndexedKeyRange::all_with_prefix(event_id, self.serializer().inner());
-        let keys = self.get_keys::<_, IndexedEventEventIdKey>(range).await?;
+    ) -> Result<(), TransactionError>
+    where
+        F: Fn(Event) -> Event,
+    {
+        let range = IndexedKeyRange::<IndexedEventEventIdKey>::all_with_prefix(
+            event_id,
+            self.serializer().inner(),
+        );
 
-        if !keys.is_empty() {
+        if exclude.is_empty() {
+            self.update_items_by_key::<Event, IndexedEventEventIdKey, _>(range, f).await?;
+        } else {
             let exclude = exclude
                 .iter()
                 .map(|linked_chunk_id| self.serializer().encode_key((event_id, *linked_chunk_id)))
                 .collect::<HashSet<IndexedEventEventIdKey>>();
-            let keys = keys.into_iter().filter(|key| !exclude.contains(key)).collect::<Vec<_>>();
-
-            for key in keys {
-                self.update_items_by_key::<Event, IndexedEventEventIdKey, F>(key, f).await?;
-            }
+            self.update_items_by_key_with_indexed_item_filter::<_, IndexedEventEventIdKey, _, _>(
+                range,
+                |indexed| !exclude.contains(&indexed.event_id),
+                f,
+            )
+            .await?;
         }
 
         Ok(())
