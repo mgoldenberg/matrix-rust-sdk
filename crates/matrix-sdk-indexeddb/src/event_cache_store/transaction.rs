@@ -502,8 +502,7 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
         event_id: &EventId,
         f: F,
     ) -> Result<(), TransactionError> {
-        let range = IndexedKeyRange::all_with_prefix(event_id, self.serializer().inner());
-        self.update_items_by_key::<Event, IndexedEventEventIdKey, F>(range, f).await
+        self.update_events_by_event_id_excluding(&[], event_id, f).await
     }
 
     /// Same as [`Self::update_events_by_event_id`], but does not update events
@@ -517,21 +516,22 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
     where
         F: Fn(Event) -> Event,
     {
-        let range = IndexedKeyRange::<IndexedEventEventIdKey>::all_with_prefix(
-            event_id,
-            self.serializer().inner(),
-        );
-
         if exclude.is_empty() {
-            self.update_items_by_key::<Event, IndexedEventEventIdKey, _>(range, f).await?;
+            self.update_items_by_key_components::<Event, IndexedEventEventIdKey, _>(event_id, f)
+                .await?;
         } else {
             let exclude = exclude
                 .iter()
-                .map(|linked_chunk_id| self.serializer().encode_key((event_id, *linked_chunk_id)))
-                .collect::<HashSet<IndexedEventEventIdKey>>();
-            self.update_items_by_key_with_indexed_item_filter::<_, IndexedEventEventIdKey, _, _>(
-                range,
-                |indexed| !exclude.contains(&indexed.event_id),
+                .map(|linked_chunk_id| {
+                    self.serializer().inner().hash_key(
+                        crate::event_cache_store::migrations::current::keys::LINKED_CHUNK_IDS,
+                        linked_chunk_id.storage_key(),
+                    )
+                })
+                .collect::<HashSet<_>>();
+            self.update_items_by_key_components_with_indexed_item_filter::<_, IndexedEventEventIdKey, _, _>(
+                event_id,
+                |indexed| !exclude.contains(indexed.id.indexed_linked_chunk_id()),
                 f,
             )
             .await?;
