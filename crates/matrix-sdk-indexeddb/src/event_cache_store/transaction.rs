@@ -29,8 +29,8 @@ use crate::{
             IndexedChunk, IndexedChunkIdKey, IndexedEvent, IndexedEventError,
             IndexedEventEventIdKey, IndexedEventIdKey, IndexedEventOutOfBandKey,
             IndexedEventPositionKey, IndexedEventRelationKey, IndexedEventRoomKey, IndexedGapIdKey,
-            IndexedLease, IndexedLeaseIdKey, IndexedNextChunkIdKey, IndexedThread,
-            IndexedThreadIdKey,
+            IndexedLease, IndexedLeaseIdKey, IndexedLinkedChunkId, IndexedNextChunkIdKey,
+            IndexedThread, IndexedThreadIdKey,
         },
         types::{Chunk, ChunkType, Event, Gap, Lease, Position, Thread},
     },
@@ -523,10 +523,7 @@ impl<'a> IndexeddbEventCacheStoreTransaction<'a> {
             let exclude = exclude
                 .iter()
                 .map(|linked_chunk_id| {
-                    self.serializer().inner().hash_key(
-                        crate::event_cache_store::migrations::current::keys::LINKED_CHUNK_IDS,
-                        linked_chunk_id.storage_key(),
-                    )
+                    IndexedLinkedChunkId::encode_from(linked_chunk_id, self.serializer().inner())
                 })
                 .collect::<HashSet<_>>();
             self.update_items_by_key_components_with_indexed_item_filter::<_, IndexedEventEventIdKey, _, _>(
